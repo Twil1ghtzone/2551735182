@@ -228,11 +228,22 @@ class Runner:
 RUNNER = Runner()
 
 # ─── Anmeldung ───────────────────────────────────────────────
+MIN_PW_LEN = int(os.environ.get("UI_MIN_PASSWORD_LEN", "12"))
 PASSWORD = os.environ.get("UI_PASSWORD", "").strip()
 if not PASSWORD:
     PASSWORD = secrets.token_urlsafe(12)
     print(f"[webui] Kein UI_PASSWORD gesetzt. Zugangswort für diese Sitzung: {PASSWORD}",
           flush=True)
+elif len(PASSWORD) < MIN_PW_LEN:
+    # Wer die Oberfläche erreicht, kann Downloads auslösen und sieht die
+    # Dateinamen. Ein kurzes Wort ist im LAN in Minuten geraten.
+    print(f"[webui] ABBRUCH: UI_PASSWORD ist zu kurz ({len(PASSWORD)} Zeichen, "
+          f"mindestens {MIN_PW_LEN} nötig).\n"
+          f"         Entweder ein längeres wählen, UI_PASSWORD leer lassen "
+          f"(dann wird eines erzeugt)\n"
+          f"         oder die Grenze bewusst senken: UI_MIN_PASSWORD_LEN=...",
+          file=sys.stderr, flush=True)
+    sys.exit(2)
 
 SESSIONS = {}          # token -> (ablauf, csrf)
 FAILS = {}             # ip -> (anzahl, sperre_bis)

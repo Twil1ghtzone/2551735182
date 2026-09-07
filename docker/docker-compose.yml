@@ -50,8 +50,10 @@ services:
       # - UI_TLS_KEY=/data/config/ui.key
     security_opt: [no-new-privileges:true]
     cap_drop: [ALL]
+    read_only: true          # Nur /data und /tmp sind beschreibbar
     tmpfs:
       - /tmp:size=64m,mode=1777
+      - /run:size=8m
 
 networks:
   tornet:

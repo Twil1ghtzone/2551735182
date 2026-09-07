@@ -12,7 +12,8 @@ if [ "$(id -u)" -eq 0 ]; then
     usermod  -o -u "$PUID" -g "$PGID" dl 2>/dev/null || true
     mkdir -p "$DATA_DIR"/{downloads,quarantine,config,state}
     chown -R "$PUID:$PGID" "$DATA_DIR" 2>/dev/null || true
-    chown -R "$PUID:$PGID" /app 2>/dev/null || true
+    # /app bewusst NICHT übereignen: der Dienst soll seinen eigenen Code
+    # nicht überschreiben können. Lesen und Ausführen reicht (0755 durch root).
     echo "[entrypoint] starte als UID $PUID / GID $PGID"
     exec setpriv --reuid="$PUID" --regid="$PGID" --init-groups \
          python3 -u /app/webui.py

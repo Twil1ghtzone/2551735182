@@ -115,6 +115,19 @@ setzen:
 Dann wird auch das Sitzungscookie mit `Secure` ausgeliefert. Alternativ den
 Reverse-Proxy der NAS mit HTTPS davorstellen.
 
+### Weitere Härtung
+
+- Der Dienst kann seinen **eigenen Code nicht überschreiben**: `/app` gehört
+  root, der Dienst darf nur lesen und ausführen. `read_only: true` macht
+  zusätzlich das gesamte Wurzeldateisystem unbeschreibbar; nur `/data` und
+  `/tmp` sind beschreibbar.
+- Das Zugangswort muss mindestens 12 Zeichen haben, sonst startet der
+  Container nicht (`UI_MIN_PASSWORD_LEN` senkt die Grenze bewusst).
+- Text aus der Fremdquelle (Dateinamen, URLs) wird in der Oberfläche
+  escaped. Geprüft mit einer Archivseite, die `<script>`- und
+  `onerror`-Nutzlasten in Dateinamen unterbringt: nichts wird ausgeführt,
+  und die Dateinamen selbst werden ohnehin auf harmlose Zeichen reduziert.
+
 ### Was weiterhin gilt
 
 - Wer die Oberfläche erreicht, kann Downloads auslösen und Dateinamen sehen.
@@ -122,6 +135,24 @@ Reverse-Proxy der NAS mit HTTPS davorstellen.
 - `PIN_REQUIRE_HTTPS=0` ist nur nötig, wenn dein Ziel eine `.onion`-Adresse
   ist — dort verschlüsselt Tor selbst.
 - Tor liefert wenige MB/s. Sehr große Bestände dauern entsprechend.
+
+### Offene Punkte
+
+Ehrlich benannt, was **nicht** abgesichert ist:
+
+- **Keine Signaturprüfung.** Die Prüfsummendatei kommt vom selben Server wie
+  die Dateien. Wer den Server kontrolliert, fälscht beides. Eine
+  GPG-signierte `SHA256SUMS` gegen einen hinterlegten Schlüssel wäre der
+  nächste sinnvolle Schritt.
+- **Kein TLS in der Vorgabe.** Zugangswort und Sitzungscookie gehen im
+  Klartext durchs LAN, bis `UI_TLS_CERT`/`UI_TLS_KEY` gesetzt sind.
+- **Das Basis-Image ist auf ein Tag festgelegt, nicht auf einen Digest.**
+  `debian:12-slim` kann sich ändern. Für maximale Nachvollziehbarkeit den
+  Digest eintragen (`FROM debian:12-slim@sha256:...`).
+- **Der Inhalt einer Datei wird nicht auf Schadcode geprüft.** Ein Haken für
+  einen Virenscanner vor dem Verschieben ins Zielverzeichnis fehlt noch.
+- **`Retry-After` wird ignoriert**, und dauerhaft scheiternde Dateien werden
+  bei jedem Lauf erneut geladen.
 
 ## Sicherheitsentscheidungen
 

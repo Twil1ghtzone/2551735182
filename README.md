@@ -67,6 +67,12 @@ Die Oberfläche läuft auf Port 8080 und ist absichtlich auf `127.0.0.1`
 gebunden. Für den Zugriff aus dem Heimnetz die LAN-Adresse der NAS
 eintragen – **nicht** im Router nach außen weiterleiten.
 
+Der Downloader-Container hängt in einem Netz ohne Route ins Internet; der
+einzige Ausgang ist der Tor-Container. Eine Verbindung an Tor vorbei ist
+damit nicht bloß verboten, sondern unmöglich. Mit `ENFORCE_ANON=1` lässt
+sich der Schutz auch über die Oberfläche nicht abschalten. Details in
+[docker/README.md](docker/README.md).
+
 ## Voraussetzungen
 
 `bash` ab Version 4, `curl`, `sha256sum`, GNU-Coreutils. Für Systeme mit

@@ -29,6 +29,22 @@ BIND_HOST    = os.environ.get("UI_BIND", "0.0.0.0")
 BIND_PORT    = int(os.environ.get("UI_PORT", "8080"))
 SESSION_TTL  = int(os.environ.get("UI_SESSION_TTL", "43200"))   # 12 h
 MAX_BODY     = 64 * 1024
+UI_TLS_CERT  = os.environ.get("UI_TLS_CERT", "").strip()
+UI_TLS_KEY   = os.environ.get("UI_TLS_KEY", "").strip()
+
+# ─── Erzwungene Sicherheitseinstellungen ─────────────────────
+# Ohne diese Sperre könnte jeder mit Zugriff auf die Oberfläche den
+# Anonymitätsschutz abschalten und damit die echte IP preisgeben.
+# Was hier eingetragen ist, lässt sich im Browser nicht mehr ändern.
+ENFORCE_ANON = os.environ.get("ENFORCE_ANON", "1") == "1"
+PINNED = {}
+if ENFORCE_ANON:
+    PINNED = {
+        "ANON_MODE": "1",
+        "LEAK_CHECK": "1",
+        "REQUIRE_HTTPS": os.environ.get("PIN_REQUIRE_HTTPS", "1"),
+        "SOCKS_PROXY": os.environ.get("PIN_SOCKS_PROXY", "socks5h://tor:9050"),
+    }
 
 # ─── Konfigurationsschema ────────────────────────────────────
 # (typ, vorgabe, gruppe, beschriftung, hilfetext, extra)
@@ -139,10 +155,12 @@ def read_config():
                         cfg[k] = ok
     except FileNotFoundError:
         pass
+    cfg.update(PINNED)          # festgezurrte Werte gewinnen immer
     return cfg
 
 
 def write_config(cfg):
+    cfg = dict(cfg); cfg.update(PINNED)
     os.makedirs(CONFIG_DIR, exist_ok=True)
     tmp = CONFIG_FILE + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
@@ -370,10 +388,12 @@ class Handler(BaseHTTPRequestHandler):
                 "schema": [
                     {"key": k, "type": SCHEMA[k][0], "default": SCHEMA[k][1],
                      "group": SCHEMA[k][2], "label": SCHEMA[k][3], "help": SCHEMA[k][4],
-                     **SCHEMA[k][5]}
+                     "locked": k in PINNED, **SCHEMA[k][5]}
                     for k in SCHEMA
                 ],
                 "groups": GROUPS,
+                "enforce_anon": ENFORCE_ANON,
+                "tls": bool(UI_TLS_CERT and UI_TLS_KEY),
             })
         if path == "/api/log":
             q = parse_qs(urlparse(self.path).query)
@@ -403,9 +423,10 @@ class Handler(BaseHTTPRequestHandler):
                 tok, csrf = new_session()
                 with SESS_LOCK:
                     FAILS.pop(ip, None)
+                secure = "; Secure" if (UI_TLS_CERT and UI_TLS_KEY) else ""
                 return self._json(200, {"ok": True, "csrf": csrf}, extra=[
                     ("Set-Cookie",
-                     f"sid={tok}; HttpOnly; SameSite=Strict; Path=/; Max-Age={SESSION_TTL}")])
+                     f"sid={tok}; HttpOnly; SameSite=Strict{secure}; Path=/; Max-Age={SESSION_TTL}")])
             note_fail(ip)
             time.sleep(0.5)
             return self._json(401, {"error": "falsches Zugangswort"})
@@ -433,6 +454,9 @@ class Handler(BaseHTTPRequestHandler):
             for k, raw in body.items():
                 if k not in SCHEMA:
                     continue          # unbekannte Schlüssel still verwerfen
+                if k in PINNED and str(raw) != PINNED[k]:
+                    errors.append(f"{SCHEMA[k][3]}: durch ENFORCE_ANON gesperrt")
+                    continue
                 val, err = validate(k, raw)
                 if err:
                     errors.append(err)
@@ -468,9 +492,27 @@ def main():
     if os.environ.get("AUTOSTART", "0") == "1":
         ok, msg = RUNNER.start()
         print(f"[webui] Autostart: {msg}", flush=True)
+    if ENFORCE_ANON:
+        print(f"[webui] Anonymitätsschutz gesperrt (nicht im Browser abschaltbar): "
+              f"{', '.join(f'{k}={v}' for k, v in sorted(PINNED.items()))}", flush=True)
+    else:
+        print("[webui] WARNUNG: ENFORCE_ANON=0 – der Schutz lässt sich "
+              "über die Oberfläche abschalten.", flush=True)
     srv = ThreadingHTTPServer((BIND_HOST, BIND_PORT), Handler)
     srv.daemon_threads = True
-    print(f"[webui] bereit auf http://{BIND_HOST}:{BIND_PORT}", flush=True)
+    scheme = "http"
+    if UI_TLS_CERT and UI_TLS_KEY:
+        import ssl
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+        ctx.load_cert_chain(UI_TLS_CERT, UI_TLS_KEY)
+        srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+        scheme = "https"
+    else:
+        print("[webui] Hinweis: ohne TLS wird das Zugangswort im Klartext "
+              "durchs Netz geschickt. UI_TLS_CERT/UI_TLS_KEY setzen oder "
+              "einen HTTPS-Reverse-Proxy davorstellen.", flush=True)
+    print(f"[webui] bereit auf {scheme}://{BIND_HOST}:{BIND_PORT}", flush=True)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

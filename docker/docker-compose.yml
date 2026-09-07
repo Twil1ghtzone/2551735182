@@ -1,16 +1,23 @@
+# Kern der Absicherung: der Downloader hängt AUSSCHLIESSLICH in einem
+# internen Netz ohne Route ins Internet. Der einzige Weg nach draußen
+# führt über den Tor-Container. Selbst eine falsche Einstellung kann
+# damit keine Verbindung an Tor vorbei aufbauen – es gibt keine.
 services:
   tor:
-    image: dperson/torproxy:latest
+    build:
+      context: ..
+      dockerfile: docker/tor/Dockerfile
+    image: secure-downloader-tor:3.3
     container_name: downloader-tor
     restart: unless-stopped
-    networks: [dlnet]
-    # Der SOCKS-Port bleibt im internen Netz – nichts wird zum Host geöffnet.
+    networks: [tornet, outnet]     # Brücke: internes Netz <-> Internet
+    security_opt: [no-new-privileges:true]
     healthcheck:
-      test: ["CMD-SHELL", "curl -s --socks5-hostname 127.0.0.1:9050 -o /dev/null -m 20 https://check.torproject.org/ || exit 1"]
+      test: ["CMD-SHELL", "curl -s --socks5-hostname 127.0.0.1:9050 -o /dev/null -m 25 https://check.torproject.org/ || exit 1"]
       interval: 60s
-      timeout: 25s
+      timeout: 30s
       retries: 3
-      start_period: 40s
+      start_period: 60s
 
   downloader:
     build:
@@ -19,27 +26,35 @@ services:
     image: secure-downloader:3.3
     container_name: downloader
     restart: unless-stopped
-    depends_on: [tor]
-    networks: [dlnet]
+    depends_on:
+      tor:
+        condition: service_healthy
+    networks: [tornet]             # NUR internes Netz – kein Direktzugang
     ports:
-      # WICHTIG: an die LAN-Adresse deiner NAS binden, nicht an 0.0.0.0,
-      # und niemals im Router nach außen weiterleiten.
+      # Auf die LAN-Adresse der NAS ändern, z. B. "192.168.1.50:8080:8080".
+      # Niemals im Router nach außen weiterleiten.
       - "127.0.0.1:8080:8080"
     volumes:
       - /volume1/daten/archiv:/data
     environment:
-      - PUID=1000                 # id -u deines NAS-Benutzers
-      - PGID=1000                 # id -g deines NAS-Benutzers
+      - PUID=1000                       # id -u deines NAS-Benutzers
+      - PGID=1000                       # id -g deines NAS-Benutzers
       - TZ=Europe/Berlin
-      - UI_PASSWORD=              # leer = Zufallswort, steht im Container-Log
-      - AUTOSTART=0               # 1 = nach Neustart sofort weiterladen
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
+      - UI_PASSWORD=                    # leer = Zufallswort im Container-Log
+      - AUTOSTART=0                     # 1 = nach Neustart sofort weiterladen
+      - ENFORCE_ANON=1                  # Schutz im Browser nicht abschaltbar
+      - PIN_SOCKS_PROXY=socks5h://tor:9050
+      - PIN_REQUIRE_HTTPS=1             # 0 nur, wenn dein Ziel .onion ist
+      # Für HTTPS auf der Oberfläche eigene Dateien einhängen und setzen:
+      # - UI_TLS_CERT=/data/config/ui.crt
+      # - UI_TLS_KEY=/data/config/ui.key
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
     tmpfs:
       - /tmp:size=64m,mode=1777
 
 networks:
-  dlnet:
+  tornet:
+    internal: true      # <- kein Weg ins Internet
+  outnet:
     driver: bridge

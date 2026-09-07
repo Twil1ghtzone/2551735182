@@ -63,6 +63,66 @@ Das Skript funktioniert unverändert direkt:
 docker compose exec downloader /app/downloader.sh --help
 ```
 
+## Das Sicherheitsmodell
+
+### Kein Weg an Tor vorbei
+
+Der Downloader-Container hängt **ausschließlich** im Netz `tornet`, das als
+`internal: true` deklariert ist. Es existiert keine Route ins Internet. Der
+Tor-Container hängt in beiden Netzen und ist damit der einzige Ausgang.
+
+Das ist der Unterschied zwischen einer Zusage in Software und einer im
+Netzaufbau: selbst wenn die Konfiguration falsch wäre, *kann* keine
+Verbindung an Tor vorbei entstehen — es gibt keine.
+
+Nachgemessen im laufenden Aufbau:
+
+| Prüfung | Ergebnis |
+|---|---|
+| Über Tor nach draußen | `{"IsTor":true,"IP":"192.42.116.92"}` |
+| Direkt per Hostname | keine Verbindung |
+| Direkt per roher IP | keine Verbindung |
+| DNS-Auflösung nach draußen | nicht möglich |
+| Oberfläche vom Host | erreichbar |
+
+### Der Schutz lässt sich im Browser nicht abschalten
+
+Mit `ENFORCE_ANON=1` sind `ANON_MODE`, `LEAK_CHECK`, `REQUIRE_HTTPS` und
+`SOCKS_PROXY` festgezurrt. In der Oberfläche erscheinen sie mit Schloss und
+sind nicht bedienbar; ein Versuch über die Schnittstelle wird abgewiesen.
+Ohne diese Sperre könnte jeder mit Zugriff auf die Oberfläche den Schutz
+ausschalten und die echte IP preisgeben.
+
+Zum Prüfen: `docker logs downloader` zeigt beim Start, was gesperrt ist.
+
+### Eigener Tor-Container
+
+Tor wird aus den signierten Debian-Paketquellen im eigenen Image gebaut
+(`docker/tor/`). So hängt kein unversioniertes `:latest` eines Dritten in
+der Kette.
+
+### Verschlüsselung der Oberfläche
+
+Ohne TLS geht das Zugangswort im Klartext durchs Netz — im eigenen LAN
+meist hinnehmbar, aber kein guter Zustand. Eigene Zertifikate einhängen und
+setzen:
+
+```yaml
+- UI_TLS_CERT=/data/config/ui.crt
+- UI_TLS_KEY=/data/config/ui.key
+```
+
+Dann wird auch das Sitzungscookie mit `Secure` ausgeliefert. Alternativ den
+Reverse-Proxy der NAS mit HTTPS davorstellen.
+
+### Was weiterhin gilt
+
+- Wer die Oberfläche erreicht, kann Downloads auslösen und Dateinamen sehen.
+  Der Port gehört ins LAN, nicht ins Internet.
+- `PIN_REQUIRE_HTTPS=0` ist nur nötig, wenn dein Ziel eine `.onion`-Adresse
+  ist — dort verschlüsselt Tor selbst.
+- Tor liefert wenige MB/s. Sehr große Bestände dauern entsprechend.
+
 ## Sicherheitsentscheidungen
 
 - Der Container läuft unprivilegiert, ohne zusätzliche Rechte

@@ -297,18 +297,22 @@ function renderSettings(){
     `<button data-g="${esc(g)}" class="${g===GROUP?"on":""}" onclick="pickGroup('${esc(g)}')">${esc(g)}</button>`).join("");
   $("fields").innerHTML = SCHEMA.filter(f=>f.group===GROUP).map(f=>{
     const v = CONFIG[f.key] ?? f.default;
+    const lock = f.locked ? " disabled" : "";
     let input;
     if(f.type==="bool"){
-      input = `<label class="switch"><input type="checkbox" data-key="${esc(f.key)}" ${v==="1"?"checked":""}><i></i></label>`;
+      input = `<label class="switch"><input type="checkbox" data-key="${esc(f.key)}" ${v==="1"?"checked":""}${lock}><i></i></label>`;
     } else if(f.type==="int"){
-      input = `<input type="number" data-key="${esc(f.key)}" value="${esc(v)}"
+      input = `<input type="number" data-key="${esc(f.key)}" value="${esc(v)}"${lock}
                  ${f.min!=null?`min="${f.min}"`:""} ${f.max!=null?`max="${f.max}"`:""}>`;
     } else {
-      input = `<input type="text" data-key="${esc(f.key)}" value="${esc(v)}" spellcheck="false"
+      input = `<input type="text" data-key="${esc(f.key)}" value="${esc(v)}" spellcheck="false"${lock}
                  placeholder="${f.type==='url_opt'?'optional':''}">`;
     }
+    const note = f.locked
+      ? `<div class="help" style="color:var(--ok)">🔒 Fest eingestellt – im Browser nicht änderbar (ENFORCE_ANON).</div>`
+      : "";
     return `<div class="field"><div><label>${esc(f.label)}</label>
-              <div class="help">${esc(f.help)}</div></div><div>${input}</div></div>`;
+              <div class="help">${esc(f.help)}</div>${note}</div><div>${input}</div></div>`;
   }).join("");
 }
 function pickGroup(g){ GROUP=g; renderSettings(); }
@@ -360,7 +364,10 @@ async function refresh(){
     if(TAB==="settings" && !$("fields").children.length) renderSettings();
     // Läuft ein Auftrag, sind die Felder gesperrt – das Skript liest die
     // Konfiguration beim Start ein, spätere Änderungen wären wirkungslos.
-    document.querySelectorAll("#fields [data-key]").forEach(el=>el.disabled=d.running);
+    document.querySelectorAll("#fields [data-key]").forEach(el=>{
+      const f = SCHEMA.find(x=>x.key===el.dataset.key);
+      el.disabled = d.running || (f && f.locked);
+    });
     $("saveHint").textContent = d.running ? "Zum Ändern erst anhalten." : "";
     if(TAB==="files") loadFiles();
     if(TAB==="log") loadLog();

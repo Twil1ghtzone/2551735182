@@ -1,0 +1,10 @@
+# Laufzeitdaten – gehören nicht ins Repo
+downloads/
+quarantine/
+state/
+config/
+data/
+*.log
+*.part
+.lock.d/
+downloader.conf

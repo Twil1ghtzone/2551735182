@@ -1,0 +1,381 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Secure Downloader</title>
+<style>
+:root{
+  --bg:#f6f7f9; --card:#fff; --line:#e3e6ea; --fg:#1b1f24; --muted:#697280;
+  --accent:#2f6fed; --ok:#1f9254; --warn:#b3730a; --err:#c33b3b; --dim:#f0f2f5;
+  --radius:12px; --shadow:0 1px 2px rgba(16,24,40,.06),0 1px 3px rgba(16,24,40,.04);
+}
+@media (prefers-color-scheme:dark){
+  :root{--bg:#14171c; --card:#1c2027; --line:#2b313a; --fg:#e6e9ee; --muted:#98a2b3;
+        --accent:#5b8dff; --ok:#3fb27f; --warn:#d99b34; --err:#e5706e; --dim:#232830;
+        --shadow:0 1px 2px rgba(0,0,0,.4);}
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);
+  font:14px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+a{color:var(--accent)}
+.wrap{max-width:1080px;margin:0 auto;padding:20px 16px 60px}
+header{display:flex;align-items:center;gap:12px;margin:8px 0 20px;flex-wrap:wrap}
+h1{font-size:17px;font-weight:650;margin:0;letter-spacing:-.01em}
+.grow{flex:1}
+.pill{display:inline-flex;align-items:center;gap:7px;padding:5px 11px;border-radius:999px;
+  background:var(--dim);font-size:12.5px;font-weight:550}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--muted);flex:none}
+.dot.ok{background:var(--ok)} .dot.err{background:var(--err)} .dot.warn{background:var(--warn)}
+.dot.live{animation:pulse 1.6s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+button{font:inherit;font-weight:550;padding:8px 15px;border-radius:9px;border:1px solid var(--line);
+  background:var(--card);color:var(--fg);cursor:pointer;transition:.12s}
+button:hover:not(:disabled){border-color:var(--muted)}
+button:disabled{opacity:.45;cursor:not-allowed}
+button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+button.danger{background:var(--err);border-color:var(--err);color:#fff}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);
+  padding:16px;box-shadow:var(--shadow)}
+.card h2{font-size:11.5px;font-weight:650;text-transform:uppercase;letter-spacing:.06em;
+  color:var(--muted);margin:0 0 12px}
+.row{display:flex;justify-content:space-between;gap:12px;padding:5px 0;font-size:13.5px}
+.row span:first-child{color:var(--muted)}
+.row span:last-child{text-align:right;overflow-wrap:anywhere;hyphens:none;font-variant-numeric:tabular-nums}
+.big{font-size:26px;font-weight:650;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
+.bar{height:7px;background:var(--dim);border-radius:99px;overflow:hidden;margin:10px 0 6px}
+.bar>i{display:block;height:100%;background:var(--accent);border-radius:99px;transition:width .4s}
+.bar>i.ok{background:var(--ok)}
+.tabs{display:flex;gap:4px;flex-wrap:wrap;margin:26px 0 14px;border-bottom:1px solid var(--line)}
+.tabs button{background:none;border:none;border-bottom:2px solid transparent;border-radius:0;
+  padding:9px 13px;color:var(--muted);font-weight:550}
+.tabs button.on{color:var(--fg);border-bottom-color:var(--accent)}
+.field{padding:13px 0;border-bottom:1px solid var(--line);display:grid;
+  grid-template-columns:1fr 300px;gap:16px;align-items:start}
+.field:last-child{border-bottom:none}
+.field label{font-weight:550;display:block;margin-bottom:3px}
+.field .help{color:var(--muted);font-size:12.5px}
+.field input[type=text],.field input[type=number],.field input[type=password]{
+  width:100%;padding:8px 11px;border:1px solid var(--line);border-radius:8px;
+  background:var(--bg);color:var(--fg);font:inherit}
+.field input:focus{outline:2px solid var(--accent);outline-offset:-1px;border-color:transparent}
+.switch{position:relative;width:44px;height:25px;flex:none}
+.switch input{opacity:0;width:100%;height:100%;margin:0;cursor:pointer}
+.switch i{position:absolute;inset:0;background:var(--line);border-radius:99px;pointer-events:none;transition:.15s}
+.switch i::after{content:"";position:absolute;top:3px;left:3px;width:19px;height:19px;
+  background:#fff;border-radius:50%;transition:.15s;box-shadow:0 1px 2px rgba(0,0,0,.3)}
+.switch input:checked+i{background:var(--ok)}
+.switch input:checked+i::after{transform:translateX(19px)}
+pre{background:var(--dim);border:1px solid var(--line);border-radius:10px;padding:12px;
+  font:12px/1.6 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow:auto;max-height:420px;margin:0}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{text-align:left;color:var(--muted);font-weight:550;font-size:11.5px;text-transform:uppercase;
+  letter-spacing:.05em;padding:6px 8px;border-bottom:1px solid var(--line)}
+td{padding:7px 8px;border-bottom:1px solid var(--line);overflow-wrap:anywhere}
+td.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.events{display:flex;flex-direction:column;gap:1px;max-height:320px;overflow:auto}
+.ev{display:grid;grid-template-columns:62px 58px 1fr;gap:9px;padding:5px 4px;font-size:12.5px;
+  border-radius:6px;align-items:baseline}
+.ev:hover{background:var(--dim)}
+.ev time{color:var(--muted);font-variant-numeric:tabular-nums}
+.ev b{font-size:10.5px;font-weight:650;letter-spacing:.04em}
+.l-OK b,.l-INFO b{color:var(--ok)} .l-WARN b{color:var(--warn)} .l-ERROR b{color:var(--err)}
+.l-SKIP b{color:var(--accent)} .l-START b{color:var(--muted)}
+.toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%) translateY(80px);
+  background:var(--fg);color:var(--bg);padding:11px 18px;border-radius:10px;font-weight:550;
+  opacity:0;transition:.25s;pointer-events:none;z-index:9;max-width:90vw}
+.toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+.toast.bad{background:var(--err);color:#fff}
+.login{max-width:340px;margin:14vh auto;text-align:center}
+.login .card{text-align:left}
+.hide{display:none!important}
+.sticky{position:sticky;bottom:0;background:var(--card);border-top:1px solid var(--line);
+  margin:0 -16px -16px;padding:13px 16px;display:flex;gap:10px;align-items:center;
+  border-radius:0 0 var(--radius) var(--radius)}
+@media(max-width:640px){.field{grid-template-columns:1fr}.ev{grid-template-columns:56px 52px 1fr}}
+</style>
+</head>
+<body>
+
+<div id="login" class="wrap login hide">
+  <div class="card">
+    <h2>Anmeldung</h2>
+    <div class="field" style="grid-template-columns:1fr;border:none;padding-top:4px">
+      <div>
+        <label for="pw">Zugangswort</label>
+        <input id="pw" type="password" autocomplete="current-password" autofocus>
+        <div class="help" style="margin-top:8px">Steht im Container-Protokoll, falls
+          <code>UI_PASSWORD</code> nicht gesetzt wurde.</div>
+      </div>
+    </div>
+    <button class="primary" style="width:100%" onclick="login()">Anmelden</button>
+  </div>
+</div>
+
+<div id="app" class="wrap hide">
+  <header>
+    <h1>Secure Downloader</h1>
+    <span class="pill"><i id="runDot" class="dot"></i><span id="runTxt">–</span></span>
+    <span class="grow"></span>
+    <button id="btnStart" class="primary" onclick="control('start')">Starten</button>
+    <button id="btnStop" class="danger hide" onclick="control('stop')">Anhalten</button>
+    <button onclick="logout()">Abmelden</button>
+  </header>
+
+  <div class="grid">
+    <div class="card">
+      <h2>Anonymität</h2>
+      <div class="row"><span>Status</span><span id="aStatus">–</span></div>
+      <div class="row"><span>Proxy</span><span id="aProxy">–</span></div>
+      <div class="row"><span>Sichtbare IP</span><span id="aIp">–</span></div>
+    </div>
+    <div class="card">
+      <h2>Verbindung</h2>
+      <div class="row"><span>Ziel-Host</span><span id="cHost">–</span></div>
+      <div class="row"><span>Archivseite</span><span id="cArch">–</span></div>
+      <div class="row"><span>Integrität</span><span id="cSum">–</span></div>
+    </div>
+    <div class="card">
+      <h2>Fortschritt</h2>
+      <div class="big"><span id="pIdx">0</span> <span style="color:var(--muted);font-size:16px">/ <span id="pTot">0</span></span></div>
+      <div class="bar"><i id="pBar" class="ok" style="width:0"></i></div>
+      <div class="row"><span>ok / übersprungen / Fehler</span>
+        <span><b id="pOk">0</b> · <span id="pSkip">0</span> · <span id="pFail">0</span></span></div>
+      <div class="row"><span>Geladen</span><span id="pBytes">0 B</span></div>
+      <div class="row"><span>Laufzeit</span><span id="pTime">00:00:00</span></div>
+    </div>
+    <div class="card">
+      <h2>Aktuelle Datei</h2>
+      <div id="curFile" style="font-weight:550;overflow-wrap:anywhere;min-height:21px">–</div>
+      <div class="bar"><i id="curBar" style="width:0"></i></div>
+      <div class="row"><span>Übertragen</span><span id="curBytes">–</span></div>
+      <div class="row"><span>Tempo</span><span id="curSpeed">–</span></div>
+      <div class="row"><span>Phase</span><span id="curPhase">–</span></div>
+    </div>
+  </div>
+
+  <div class="tabs">
+    <button class="on" data-tab="events" onclick="tab('events')">Ereignisse</button>
+    <button data-tab="settings" onclick="tab('settings')">Einstellungen</button>
+    <button data-tab="files" onclick="tab('files')">Dateien</button>
+    <button data-tab="log" onclick="tab('log')">Protokoll</button>
+  </div>
+
+  <section id="t-events" class="card"><div id="events" class="events"></div></section>
+
+  <section id="t-settings" class="card hide">
+    <div class="tabs" id="groupTabs" style="margin-top:0"></div>
+    <div id="fields"></div>
+    <div class="sticky">
+      <button class="primary" onclick="saveConfig()">Speichern</button>
+      <span id="saveHint" class="help" style="color:var(--muted)"></span>
+    </div>
+  </section>
+
+  <section id="t-files" class="card hide">
+    <h2>Heruntergeladen</h2>
+    <table><thead><tr><th>Datei</th><th class="num">Größe</th><th class="num">Zeit</th></tr></thead>
+      <tbody id="fDown"></tbody></table>
+    <h2 style="margin-top:22px">Quarantäne</h2>
+    <table><thead><tr><th>Datei</th><th class="num">Größe</th><th class="num">Zeit</th></tr></thead>
+      <tbody id="fQuar"></tbody></table>
+  </section>
+
+  <section id="t-log" class="card hide">
+    <div style="display:flex;gap:8px;margin-bottom:12px">
+      <button id="lg-download" class="primary" onclick="logSrc('download')">Downloader</button>
+      <button id="lg-runner" onclick="logSrc('runner')">Container</button>
+    </div>
+    <pre id="logBox">–</pre>
+  </section>
+</div>
+
+<div id="toast" class="toast"></div>
+
+<script>
+let CSRF="", SCHEMA=[], GROUPS=[], CONFIG={}, GROUP="Quelle", TAB="events", LOGSRC="download", TIMER=null;
+
+const $ = id => document.getElementById(id);
+const esc = s => String(s==null?"":s).replace(/[&<>"']/g, c =>
+  ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+function bytes(n){
+  n = Number(n)||0;
+  const u=["B","KB","MB","GB","TB"]; let i=0;
+  while(n>=1024 && i<u.length-1){ n/=1024; i++; }
+  return (i===0? n : n.toFixed(i>2?2:1)) + " " + u[i];
+}
+function hms(s){
+  s=Math.max(0,Number(s)||0);
+  const p=n=>String(n).padStart(2,"0");
+  return p(s/3600|0)+":"+p((s%3600)/60|0)+":"+p(s%60);
+}
+function toast(msg, bad){
+  const t=$("toast"); t.textContent=msg; t.className="toast show"+(bad?" bad":"");
+  clearTimeout(t._h); t._h=setTimeout(()=>t.className="toast",3200);
+}
+
+async function api(path, opt={}){
+  opt.headers = Object.assign({"Content-Type":"application/json"}, opt.headers||{});
+  if(opt.method==="POST" && CSRF) opt.headers["X-CSRF-Token"]=CSRF;
+  const r = await fetch(path, opt);
+  if(r.status===401){ show("login"); throw new Error("nicht angemeldet"); }
+  let d={}; try{ d=await r.json(); }catch(e){}
+  if(!r.ok) throw new Error(d.error||("Fehler "+r.status));
+  return d;
+}
+
+function show(which){
+  $("login").classList.toggle("hide", which!=="login");
+  $("app").classList.toggle("hide", which!=="app");
+  if(which==="login"){ clearInterval(TIMER); TIMER=null; setTimeout(()=>$("pw").focus(),50); }
+}
+
+async function login(){
+  try{
+    const d = await api("/api/login",{method:"POST",body:JSON.stringify({password:$("pw").value})});
+    CSRF=d.csrf; $("pw").value=""; start();
+  }catch(e){ toast(e.message,true); }
+}
+async function logout(){
+  try{ await api("/api/logout",{method:"POST",body:"{}"});}catch(e){}
+  CSRF=""; show("login");
+}
+
+function tab(name){
+  TAB=name;
+  document.querySelectorAll(".tabs [data-tab]").forEach(b=>b.classList.toggle("on",b.dataset.tab===name));
+  ["events","settings","files","log"].forEach(t=>$("t-"+t).classList.toggle("hide",t!==name));
+  if(name==="settings") renderSettings();
+  if(name==="files") loadFiles();
+  if(name==="log") loadLog();
+}
+function logSrc(s){
+  LOGSRC=s;
+  $("lg-download").className = s==="download"?"primary":"";
+  $("lg-runner").className   = s==="runner"?"primary":"";
+  loadLog();
+}
+
+function renderStatus(d){
+  const st=d.status||{}, run=d.running;
+  $("runDot").className = "dot "+(run?"ok live":"");
+  $("runTxt").textContent = run ? (st.phase||"läuft") : "angehalten";
+  $("btnStart").classList.toggle("hide", run);
+  $("btnStop").classList.toggle("hide", !run);
+
+  const a=st.anon||{}, c=st.connection||{}, p=st.progress||{}, cur=st.current||{};
+  const mark = (v,good)=> `<i class="dot ${v===good?"ok":(v==="unbekannt"||v==null?"":"err")}"></i> ${esc(v||"–")}`;
+  $("aStatus").innerHTML = a.status ? mark(a.status,"Tor bestätigt") : "–";
+  $("aProxy").textContent = a.proxy || "keiner – direkte Verbindung";
+  $("aIp").textContent = a.exit_ip || "–";
+  $("cHost").innerHTML = mark(c.host,"up") + (c.host_code?` <span style="color:var(--muted)">${esc(c.host_code)}</span>`:"");
+  $("cArch").innerHTML = mark(c.archive,"up") + (c.archive_code?` <span style="color:var(--muted)">${esc(c.archive_code)}</span>`:"");
+  $("cSum").textContent = c.checksums || "–";
+
+  $("pIdx").textContent = p.index||0; $("pTot").textContent = p.total||0;
+  $("pOk").textContent = p.done||0; $("pSkip").textContent = p.skipped||0; $("pFail").textContent = p.failed||0;
+  $("pBytes").textContent = bytes(p.bytes);
+  $("pTime").textContent = hms(st.elapsed);
+  $("pBar").style.width = (p.total? Math.min(100,100*(p.index||0)/p.total):0)+"%";
+
+  $("curFile").textContent = cur.file && cur.file!=="-" ? cur.file : "–";
+  $("curBar").style.width = (cur.size? Math.min(100,100*(cur.bytes||0)/cur.size):0)+"%";
+  $("curBytes").textContent = cur.size ? bytes(cur.bytes)+" / "+bytes(cur.size) : (cur.bytes?bytes(cur.bytes):"–");
+  $("curSpeed").textContent = cur.speed ? bytes(cur.speed)+"/s" : "–";
+  $("curPhase").textContent = st.phase || "–";
+
+  const ev = (st.events||[]).slice().reverse();
+  $("events").innerHTML = ev.length ? ev.map(e =>
+    `<div class="ev l-${esc(e.level)}"><time>${esc(e.time)}</time><b>${esc(e.level)}</b><span>${esc(e.text)}</span></div>`
+  ).join("") : `<div class="help" style="color:var(--muted)">Noch keine Ereignisse.</div>`;
+}
+
+function renderSettings(){
+  $("groupTabs").innerHTML = GROUPS.map(g =>
+    `<button data-g="${esc(g)}" class="${g===GROUP?"on":""}" onclick="pickGroup('${esc(g)}')">${esc(g)}</button>`).join("");
+  $("fields").innerHTML = SCHEMA.filter(f=>f.group===GROUP).map(f=>{
+    const v = CONFIG[f.key] ?? f.default;
+    let input;
+    if(f.type==="bool"){
+      input = `<label class="switch"><input type="checkbox" data-key="${esc(f.key)}" ${v==="1"?"checked":""}><i></i></label>`;
+    } else if(f.type==="int"){
+      input = `<input type="number" data-key="${esc(f.key)}" value="${esc(v)}"
+                 ${f.min!=null?`min="${f.min}"`:""} ${f.max!=null?`max="${f.max}"`:""}>`;
+    } else {
+      input = `<input type="text" data-key="${esc(f.key)}" value="${esc(v)}" spellcheck="false"
+                 placeholder="${f.type==='url_opt'?'optional':''}">`;
+    }
+    return `<div class="field"><div><label>${esc(f.label)}</label>
+              <div class="help">${esc(f.help)}</div></div><div>${input}</div></div>`;
+  }).join("");
+}
+function pickGroup(g){ GROUP=g; renderSettings(); }
+
+async function saveConfig(){
+  const body={};
+  document.querySelectorAll("#fields [data-key]").forEach(el=>{
+    body[el.dataset.key] = el.type==="checkbox" ? (el.checked?"1":"0") : el.value;
+  });
+  try{
+    const d = await api("/api/config",{method:"POST",body:JSON.stringify(body)});
+    CONFIG=d.config; toast("Einstellungen gespeichert");
+  }catch(e){ toast(e.message,true); }
+}
+
+async function control(action){
+  try{
+    const d = await api("/api/control",{method:"POST",body:JSON.stringify({action})});
+    toast(d.message||"ok"); refresh();
+  }catch(e){ toast(e.message,true); }
+}
+
+async function loadFiles(){
+  try{
+    const d = await api("/api/files");
+    const rows = list => list.length ? list.map(f=>
+      `<tr><td>${esc(f.name)}</td><td class="num">${bytes(f.size)}</td>
+       <td class="num">${new Date(f.mtime*1000).toLocaleString("de-DE")}</td></tr>`).join("")
+      : `<tr><td colspan="3" style="color:var(--muted)">leer</td></tr>`;
+    $("fDown").innerHTML = rows(d.downloads);
+    $("fQuar").innerHTML = rows(d.quarantine);
+  }catch(e){}
+}
+async function loadLog(){
+  try{
+    const d = await api("/api/log?n=200&src="+LOGSRC);
+    $("logBox").textContent = d.lines.length ? d.lines.join("\n") : "– leer –";
+    $("logBox").scrollTop = $("logBox").scrollHeight;
+  }catch(e){}
+}
+
+async function refresh(){
+  try{
+    const d = await api("/api/state");
+    CSRF=d.csrf;
+    if(!SCHEMA.length){ SCHEMA=d.schema; GROUPS=d.groups; }
+    CONFIG=d.config;
+    renderStatus(d);
+    if(TAB==="settings" && !$("fields").children.length) renderSettings();
+    // Läuft ein Auftrag, sind die Felder gesperrt – das Skript liest die
+    // Konfiguration beim Start ein, spätere Änderungen wären wirkungslos.
+    document.querySelectorAll("#fields [data-key]").forEach(el=>el.disabled=d.running);
+    $("saveHint").textContent = d.running ? "Zum Ändern erst anhalten." : "";
+    if(TAB==="files") loadFiles();
+    if(TAB==="log") loadLog();
+  }catch(e){}
+}
+
+async function start(){
+  show("app");
+  await refresh();          // erst Schema holen, dann zeichnen
+  renderSettings();
+  clearInterval(TIMER); TIMER=setInterval(refresh,2000);
+}
+
+$("pw").addEventListener("keydown", e=>{ if(e.key==="Enter") login(); });
+api("/api/session").then(d=> d.authenticated ? start() : show("login")).catch(()=>show("login"));
+</script>
+</body>
+</html>

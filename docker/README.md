@@ -169,18 +169,58 @@ nachvollziehbar, bekommt aber keine Sicherheitsupdates von allein:
 
 Etwa monatlich ausführen.
 
+### Zugriff auf die Oberfläche einschränken
+
+`UI_ALLOW_CIDR` legt fest, aus welchen Netzen die Oberfläche überhaupt
+antwortet – alles andere bekommt 403, noch vor der Anmeldung:
+
+```yaml
+- UI_ALLOW_CIDR=192.168.1.0/24,127.0.0.1/32
+```
+
+Damit ist ein versehentlich zu weit veröffentlichter Port kein Vollzugriff
+mehr. Jede Anmeldung, jede Änderung und jeder Start landen mit Uhrzeit und
+Quell-Adresse in `state/audit.log` und im Reiter *Protokoll → Zugriffe*.
+
+### Was ohne eigenes Prüfskript passiert
+
+Auch ohne `SCAN_CMD` wird geprüft: Signatur, Prüfsumme, Magic Bytes – und
+neu die **Archivstruktur**. Das Archiv wird einmal durchgelesen; eine
+abgeschnittene Datei oder eine Attrappe mit passendem Anfang fällt dabei
+auf. Für `.zip` liegt `unzip` im Image, für `.tar.gz` `gzip`, bei `.pdf`
+wird das Dateiende geprüft. Abschaltbar mit `--no-struct-check`.
+
+Was das **nicht** ersetzt: eine Prüfung auf Schadcode. Dafür bleibt
+`SCAN_CMD`; die Oberfläche zeigt unter *Absicherung*, ob eines hinterlegt ist.
+
+### Alter des Basis-Images
+
+Die Oberfläche zeigt unter *Absicherung*, wie alt das Basis-Image ist, und
+warnt nach `BASE_MAX_AGE_DAYS` (Vorgabe 45). Dafür beim Bauen das Datum
+mitgeben:
+
+```bash
+docker compose build --build-arg BUILD_DATE=$(date -u +%Y-%m-%d)
+```
+
+`./docker/check-base.sh` vergleicht den angehefteten Digest mit dem
+aktuellen und gibt 1 zurück, wenn er veraltet ist – für einen Cron-Eintrag.
+
 ### Offene Punkte
 
 Ehrlich benannt, was **nicht** abgesichert ist:
 
 - **Das selbst erzeugte TLS-Zertifikat schützt vor Mitlesen, nicht vor einem
-  Angreifer, der sich aktiv dazwischenschaltet.** Für echten Schutz ein
+  Angreifer, der sich aktiv dazwischenschaltet.** Der Fingerabdruck steht im
+  Protokoll und in der Oberfläche – einmal vergleichen. Für echten Schutz ein
   eigenes Zertifikat einhängen oder den Reverse-Proxy der NAS nutzen.
-- **Wer die Oberfläche erreicht, kann Downloads auslösen und Dateinamen
-  sehen.** Der Port gehört ins LAN, nicht ins Internet.
-- **Die Inhaltsprüfung ist nur so gut wie das hinterlegte Skript.** Ohne
-  `SCAN_CMD` findet keine statt.
-- **Der festgenagelte Digest veraltet**, wenn `update-base.sh` nie läuft.
+- **Wer die Oberfläche erreicht und das Zugangswort hat, kann Downloads
+  auslösen und Dateinamen sehen.** `UI_ALLOW_CIDR` grenzt das auf dein Netz
+  ein, das Zugriffsprotokoll macht es nachvollziehbar – aufheben lässt es
+  sich damit nicht.
+- **Auf Schadcode wird nur geprüft, wenn du ein `SCAN_CMD` hinterlegst.**
+  Struktur- und Typprüfung erkennen defekte und getarnte Dateien, keinen
+  Schadcode darin.
 
 ## Sicherheitsentscheidungen
 

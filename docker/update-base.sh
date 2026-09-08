@@ -23,4 +23,5 @@ for f in Dockerfile tor/Dockerfile; do
 done
 echo
 echo "Neuer Digest: $digest"
-echo "Jetzt neu bauen:  docker compose build --no-cache"
+echo "Jetzt neu bauen:"
+echo "  docker compose build --no-cache --build-arg BUILD_DATE=\$(date -u +%Y-%m-%d)"

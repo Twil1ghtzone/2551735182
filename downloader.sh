@@ -17,7 +17,7 @@ set -euo pipefail
 umask 077
 export LC_ALL=C
 
-VERSION="3.4"
+VERSION="3.5"
 SELF="${0##*/}"
 
 # ─── Vorgaben (überschreibbar per Konfig-Datei und CLI) ──────
@@ -32,6 +32,7 @@ KEY_FINGERPRINT=""              # Fingerabdruck festnageln (dringend empfohlen)
 # ein Eingabefeld für ein auszuführendes Programm wäre eine Lücke.
 SCAN_CMD="${SCAN_CMD:-}"        # ausführbare Datei für eigene Inhaltsprüfung
 SCAN_TIMEOUT="${SCAN_TIMEOUT:-300}"   # Zeitgrenze, danach gilt es als Befund
+STRUCT_CHECK=1                  # Archive auf Lesbarkeit prüfen (eingebaut)
 DATA_DIR=""                     # Wurzel für ALLE Daten (NAS-Pfad)
 SOCKS_PROXY=""
 ANON_MODE=1                     # 1 = ohne funktionierenden Proxy kein Traffic
@@ -108,6 +109,7 @@ Anonymität
 Sicherheit
       --allow-http        HTTP ohne TLS zulassen (für .onion nötig)
       --no-type-check     Dateityp-Prüfung (Magic Bytes) abschalten
+      --no-struct-check   Archive nicht auf Lesbarkeit prüfen
       --require-hash      Dateien ohne Quell-Prüfsumme ablehnen
       --scan DATEI        eigene Prüfung vor der Übernahme (z. B. Virenscanner);
                           ausführbare Datei, bekommt den Dateipfad, Rückgabe
@@ -180,7 +182,7 @@ CONF
 
 # ─── Konfiguration einlesen (parsen, NICHT sourcen) ──────────
 # 'source' würde beliebigen Code aus der Datei ausführen.
-ALLOWED_KEYS=" BASE_URL ARCHIVE_URL CHECKSUM_URL DATA_DIR SOCKS_PROXY ANON_MODE REQUIRE_HTTPS ALLOW_ONION LOG_URLS OBFUSCATE_NAMES STRICT_TYPE LEAK_CHECK CHECK_INTERVAL MAX_WAIT_CYCLES MAX_DOWNLOAD_SPEED MAX_FILESIZE MIN_FREE_BYTES DOWNLOAD_TIMEOUT MAX_REDIRS MAX_ATTEMPTS RETRY_BACKOFF DASHBOARD USER_AGENT REQUIRE_HASH URL_LIST_TTL LOCK_MAX_AGE MAX_WAIT_INTERVAL STALL_BYTES STALL_SECONDS MAX_RESUMES VERIFY_ALL REQUEST_DELAY MAX_RETRY_AFTER QUARANTINE_KEEP SIGNATURE_MODE SIGNATURE_URL TRUSTED_KEY KEY_FINGERPRINT SCAN_CMD SCAN_TIMEOUT "
+ALLOWED_KEYS=" BASE_URL ARCHIVE_URL CHECKSUM_URL DATA_DIR SOCKS_PROXY ANON_MODE REQUIRE_HTTPS ALLOW_ONION LOG_URLS OBFUSCATE_NAMES STRICT_TYPE LEAK_CHECK CHECK_INTERVAL MAX_WAIT_CYCLES MAX_DOWNLOAD_SPEED MAX_FILESIZE MIN_FREE_BYTES DOWNLOAD_TIMEOUT MAX_REDIRS MAX_ATTEMPTS RETRY_BACKOFF DASHBOARD USER_AGENT REQUIRE_HASH URL_LIST_TTL LOCK_MAX_AGE MAX_WAIT_INTERVAL STALL_BYTES STALL_SECONDS MAX_RESUMES VERIFY_ALL REQUEST_DELAY MAX_RETRY_AFTER QUARANTINE_KEEP SIGNATURE_MODE SIGNATURE_URL TRUSTED_KEY KEY_FINGERPRINT SCAN_CMD SCAN_TIMEOUT STRUCT_CHECK "
 
 load_config() {
     local file="$1"
@@ -254,6 +256,7 @@ while [ $# -gt 0 ]; do
         --obfuscate-names) OBFUSCATE_NAMES=1; shift ;;
         --allow-http)      REQUIRE_HTTPS=0; shift ;;
         --no-type-check)   STRICT_TYPE=0; shift ;;
+        --no-struct-check) STRUCT_CHECK=0; shift ;;
         --require-hash)    REQUIRE_HASH=1; shift ;;
         --scan)            SCAN_CMD="${2:?}"; shift 2 ;;
         --refresh)         FORCE_REFRESH=1; shift ;;
@@ -1087,6 +1090,41 @@ magic_ok() {
     esac
 }
 
+# ─── Strukturprüfung ─────────────────────────────────────────
+# Die Magic Bytes sagen nur, wie eine Datei anfängt. Diese Prüfung liest
+# das Archiv einmal durch: abgeschnittene, beschädigte oder nur vorne
+# passend gebaute Dateien fallen dabei auf – ohne Fremdwerkzeuge.
+struct_ok() {
+    local f="$1" name="$2"
+    [ "${STRUCT_CHECK:-1}" -eq 1 ] || return 0
+    local ext="${name##*.}"
+    ext=$(printf '%s' "$ext" | tr 'A-Z' 'a-z')
+    case "$name" in *.tar.gz|*.tgz) ext="targz" ;; esac
+    case "$ext" in
+        gz|targz)
+            command -v gzip >/dev/null 2>&1 || return 0
+            gzip -t "$f" 2>/dev/null || return 1 ;;
+        zip|docx|xlsx)
+            if command -v unzip >/dev/null 2>&1; then
+                unzip -tqq "$f" >/dev/null 2>&1 || return 1
+            else
+                # Ohne unzip wenigstens das Ende prüfen: jedes gültige ZIP
+                # endet mit dem "End of central directory"-Kennsatz.
+                local tailhex
+                tailhex=$(tail -c 22 "$f" 2>/dev/null | od -An -tx1 2>/dev/null | tr -d ' \n')
+                case "$tailhex" in
+                    504b0506*) return 0 ;;
+                    *) tail -c 66000 "$f" 2>/dev/null | grep -qa 'PK\x05\x06' && return 0
+                       return 1 ;;
+                esac
+            fi ;;
+        pdf)
+            # Ein vollständiges PDF endet auf %%EOF.
+            tail -c 1024 "$f" 2>/dev/null | grep -qa '%%EOF' || return 1 ;;
+    esac
+    return 0
+}
+
 # ─── Remote-Metadaten ────────────────────────────────────────
 probe_remote() {
     R_SIZE=0; R_ETAG=""
@@ -1428,6 +1466,14 @@ download_file() {
         rm -f "$metafile"; return 1
     fi
 
+    if ! struct_ok "$part" "$filename"; then
+        ST_FAILED=$((ST_FAILED + 1))
+        log "ERROR" "$filename: Archiv nicht lesbar (abgeschnitten oder beschädigt)."
+        quarantine "$part" "$filename" "Archiv defekt"
+        fail_record "$filename" "Archiv defekt"
+        rm -f "$metafile"; return 1
+    fi
+
     if [ -n "$SCAN_CMD" ]; then
         ST_PHASE="prüfe Inhalt: $filename"
         render
@@ -1658,6 +1704,10 @@ main() {
     [ "$HAVE_PCRE" -eq 0 ] && log "INFO" "Ohne PCRE-grep: nutze BusyBox-kompatiblen Parser."
     ST_PHASE="prüfe Anonymität"; render
 
+    if [ -z "$SCAN_CMD" ]; then
+        log "INFO" "Keine eigene Inhaltsprüfung gesetzt (SCAN_CMD). Es greifen nur"
+        log "INFO" "Signatur, Prüfsumme, Dateityp und Archivstruktur."
+    fi
     prepare_keyring
     verify_anonymity
     wait_for_host

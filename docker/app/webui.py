@@ -12,7 +12,7 @@ Bewusste Entscheidungen:
     Schlüssel werden verworfen.
 """
 
-import hmac, html, json, os, re, secrets, shutil, signal, subprocess, sys, threading, time
+import hmac, html, ipaddress, json, os, re, secrets, shutil, signal, subprocess, sys, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
@@ -32,6 +32,88 @@ MAX_BODY     = 64 * 1024
 UI_TLS_CERT  = os.environ.get("UI_TLS_CERT", "").strip()
 UI_TLS_KEY   = os.environ.get("UI_TLS_KEY", "").strip()
 UI_TLS_AUTO  = os.environ.get("UI_TLS_AUTO", "1") == "1"
+AUDIT_LOG    = os.path.join(DATA_DIR, "state", "audit.log")
+
+# Netze, aus denen die Oberfläche überhaupt antwortet. Leer = überall.
+# Damit ist ein versehentlich zu weit veröffentlichter Port kein
+# Vollzugriff mehr, sondern ein abgewiesener Verbindungsversuch.
+def _parse_cidrs(raw):
+    nets = []
+    for part in (raw or "").replace(";", ",").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            nets.append(ipaddress.ip_network(part, strict=False))
+        except ValueError:
+            print(f"[webui] Ungültiger Eintrag in UI_ALLOW_CIDR: {part}", flush=True)
+    return nets
+
+ALLOW_NETS = _parse_cidrs(os.environ.get("UI_ALLOW_CIDR", ""))
+
+
+def ip_allowed(addr):
+    if not ALLOW_NETS:
+        return True
+    try:
+        ip = ipaddress.ip_address(addr)
+    except ValueError:
+        return False
+    return any(ip in net for net in ALLOW_NETS)
+
+
+BASE_MAX_AGE = int(os.environ.get("BASE_MAX_AGE_DAYS", "45"))
+
+
+def base_image_age():
+    """Alter des Basis-Images in Tagen, oder None wenn unbekannt.
+
+    Ein festgenagelter Digest ist nachvollziehbar, veraltet aber still.
+    Deshalb sagt die Oberfläche selbst Bescheid, statt sich darauf zu
+    verlassen, dass jemand an update-base.sh denkt."""
+    raw = os.environ.get("BUILD_DATE", "").strip()
+    if not raw or raw == "unbekannt":
+        return None
+    for fmt in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"):
+        try:
+            built = time.mktime(time.strptime(raw[:len(time.strftime(fmt))], fmt))
+            return int((time.time() - built) / 86400)
+        except (ValueError, OverflowError):
+            continue
+    return None
+
+
+def tls_fingerprint():
+    cert = os.path.join(CONFIG_DIR, "ui.crt")
+    if UI_TLS_CERT and os.path.exists(UI_TLS_CERT):
+        cert = UI_TLS_CERT
+    if not os.path.exists(cert) or not shutil.which("openssl"):
+        return ""
+    try:
+        out = subprocess.run(["openssl", "x509", "-in", cert, "-noout",
+                              "-fingerprint", "-sha256"],
+                             capture_output=True, text=True, timeout=20).stdout
+        return out.strip().split("=", 1)[-1]
+    except (subprocess.SubprocessError, OSError):
+        return ""
+
+
+AUDIT_LOCK = threading.Lock()
+
+
+def audit(ip, action, detail=""):
+    """Wer hat wann was ausgelöst. Auf einer geteilten NAS ist das der
+    Unterschied zwischen 'irgendwer hat das gestartet' und einer Antwort."""
+    line = f"{time.strftime('%Y-%m-%d %H:%M:%S')} {ip} {action} {detail}".rstrip()
+    try:
+        with AUDIT_LOCK:
+            os.makedirs(os.path.dirname(AUDIT_LOG), exist_ok=True)
+            with open(AUDIT_LOG, "a", encoding="utf-8") as fh:
+                fh.write(line + "\n")
+            os.chmod(AUDIT_LOG, 0o600)
+    except OSError:
+        pass
+    print(f"[audit] {line}", flush=True)
 
 # ─── Erzwungene Sicherheitseinstellungen ─────────────────────
 # Ohne diese Sperre könnte jeder mit Zugriff auf die Oberfläche den
@@ -425,6 +507,8 @@ class Handler(BaseHTTPRequestHandler):
                          "default-src 'none'; style-src 'unsafe-inline'; "
                          "script-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:")
         self.send_header("Cache-Control", "no-store")
+        if globals().get("TLS_ACTIVE"):
+            self.send_header("Strict-Transport-Security", "max-age=31536000")
         for k, v in (extra or {}):
             self.send_header(k, v)
         self.end_headers()
@@ -457,8 +541,16 @@ class Handler(BaseHTTPRequestHandler):
         except (ValueError, UnicodeDecodeError):
             return None
 
+    def _blocked(self):
+        if ip_allowed(self.client_address[0]):
+            return False
+        self._json(403, {"error": "Zugriff aus diesem Netz ist nicht erlaubt"})
+        return True
+
     # -- GET ---------------------------------------------------
     def do_GET(self):
+        if self._blocked():
+            return
         path = urlparse(self.path).path
         if path in ("/", "/index.html"):
             try:
@@ -497,12 +589,19 @@ class Handler(BaseHTTPRequestHandler):
                 "groups": GROUPS,
                 "enforce_anon": ENFORCE_ANON,
                 "tls": bool(globals().get("TLS_ACTIVE")),
+                "tls_fingerprint": tls_fingerprint() if globals().get("TLS_ACTIVE") else "",
+                "allow_cidr": [str(n) for n in ALLOW_NETS],
+                "scan_active": bool(os.environ.get("SCAN_CMD", "").strip()),
+                "base": {"digest": os.environ.get("BASE_DIGEST", ""),
+                         "built": os.environ.get("BUILD_DATE", ""),
+                         "age_days": base_image_age(),
+                         "max_age_days": BASE_MAX_AGE},
             })
         if path == "/api/log":
             q = parse_qs(urlparse(self.path).query)
             n = min(500, max(10, int(q.get("n", ["150"])[0] or 150)))
             which = q.get("src", ["download"])[0]
-            src = RUN_LOG if which == "runner" else LOG_FILE
+            src = {"runner": RUN_LOG, "audit": AUDIT_LOG}.get(which, LOG_FILE)
             return self._json(200, {"lines": tail_lines(src, n)})
         if path == "/api/files":
             data = read_config().get("DATA_DIR", DATA_DIR)
@@ -514,6 +613,8 @@ class Handler(BaseHTTPRequestHandler):
 
     # -- POST --------------------------------------------------
     def do_POST(self):
+        if self._blocked():
+            return
         path = urlparse(self.path).path
         ip = self.client_address[0]
 
@@ -526,11 +627,13 @@ class Handler(BaseHTTPRequestHandler):
                 tok, csrf = new_session()
                 with SESS_LOCK:
                     FAILS.pop(ip, None)
+                audit(ip, "anmeldung", "erfolgreich")
                 secure = "; Secure" if globals().get("TLS_ACTIVE") else ""
                 return self._json(200, {"ok": True, "csrf": csrf}, extra=[
                     ("Set-Cookie",
                      f"sid={tok}; HttpOnly; SameSite=Strict{secure}; Path=/; Max-Age={SESSION_TTL}")])
             note_fail(ip)
+            audit(ip, "anmeldung", "FEHLGESCHLAGEN")
             time.sleep(0.5)
             return self._json(401, {"error": "falsches Zugangswort"})
 
@@ -544,6 +647,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/logout":
             with SESS_LOCK:
                 SESSIONS.pop(self._cookie(), None)
+            audit(ip, "abmeldung")
             return self._json(200, {"ok": True}, extra=[
                 ("Set-Cookie", "sid=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0")])
 
@@ -571,6 +675,8 @@ class Handler(BaseHTTPRequestHandler):
                 write_config(cfg)
             except OSError as exc:
                 return self._json(500, {"error": f"Speichern fehlgeschlagen: {exc}"})
+            changed = sorted(k for k in body if k in SCHEMA)
+            audit(ip, "konfiguration", ",".join(changed) or "-")
             return self._json(200, {"ok": True, "config": cfg})
 
         if path == "/api/control":
@@ -582,6 +688,7 @@ class Handler(BaseHTTPRequestHandler):
                 ok, msg = RUNNER.stop()
             else:
                 ok, msg = False, "unbekannte Aktion"
+            audit(ip, action or "?", msg)
             return self._json(200 if ok else 400, {"ok": ok, "message": msg})
 
         return self._json(404, {"error": "unbekannter Endpunkt"})

@@ -21,6 +21,8 @@ Docker-Fassung und Weboberfläche. Ausgelegt auf lange Läufe (TB-Bereich)
 - Prüfung gegen eine `SHA256SUMS`-Datei der Quelle, pfadgenau zugeordnet
 - Unverifizierte Daten landen nie im Zielverzeichnis (getrenntes Staging)
 - Magic-Byte-Prüfung: Inhalt muss zur Dateiendung passen
+- Strukturprüfung: das Archiv wird durchgelesen, abgeschnittene Dateien und
+  Attrappen mit passendem Anfang fallen auf
 - Haken für eine eigene Inhaltsprüfung (Virenscanner) vor der Übernahme
 - Auffälliges kommt in Quarantäne statt in den Downloadordner
 
@@ -58,6 +60,7 @@ Wichtige Optionen:
     --key DATEI       dein öffentlicher Schlüssel
     --key-fp FINGER   erwarteter Fingerabdruck des Signierers
     --scan DATEI      eigene Inhaltsprüfung vor der Übernahme
+    --no-struct-check Archive nicht auf Lesbarkeit prüfen
     --retry-failed    gesperrte Fehlschläge sofort erneut versuchen
     --delay SEKUNDEN  Pause zwischen Dateien
     --no-dashboard    Zeilenlogging statt TUI (Cron/NAS)

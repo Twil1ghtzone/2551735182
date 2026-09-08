@@ -7,7 +7,7 @@ services:
     build:
       context: ..
       dockerfile: docker/tor/Dockerfile
-    image: secure-downloader-tor:3.3
+    image: secure-downloader-tor:3.5
     container_name: downloader-tor
     restart: unless-stopped
     networks: [tornet, outnet]     # Brücke: internes Netz <-> Internet
@@ -23,7 +23,11 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile
-    image: secure-downloader:3.3
+      args:
+        # Bei jedem Bau mitgeben, damit die Oberfläche das Alter kennt:
+        #   docker compose build --build-arg BUILD_DATE=$(date -u +%Y-%m-%d)
+        BUILD_DATE: "${BUILD_DATE:-unbekannt}"
+    image: secure-downloader:3.5
     container_name: downloader
     restart: unless-stopped
     depends_on:
@@ -43,6 +47,10 @@ services:
       - UI_PASSWORD=                    # leer = Zufallswort im Container-Log
       - AUTOSTART=0                     # 1 = nach Neustart sofort weiterladen
       - ENFORCE_ANON=1                  # Schutz im Browser nicht abschaltbar
+      # Nur aus diesen Netzen antwortet die Oberfläche überhaupt.
+      # Leer lassen heißt: aus jedem Netz, das den Port erreicht.
+      - UI_ALLOW_CIDR=192.168.0.0/16,10.0.0.0/8,127.0.0.1/32
+      - BASE_MAX_AGE_DAYS=45            # danach warnt die Oberfläche
       - PIN_SOCKS_PROXY=socks5h://tor:9050
       - PIN_REQUIRE_HTTPS=1             # 0 nur, wenn dein Ziel .onion ist
       # TLS: erzeugt beim ersten Start ein eigenes Zertifikat und schreibt
@@ -71,7 +79,9 @@ services:
 #    restart: unless-stopped
 #    networks: [tornet]
 #    volumes:
-#      - /volume1/daten/archiv:/data:ro
+#      - /volume1/daten/archiv:/data:ro,z
+#    # ":z" (klein) statt ":Z": wird dasselbe Verzeichnis in mehrere
+#    # Container gehängt, sperrt ":Z" den jeweils anderen aus.
 #    # /data/config/scan.sh ruft dann clamdscan im Beiwagen auf.
 
 networks:

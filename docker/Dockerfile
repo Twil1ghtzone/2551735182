@@ -7,7 +7,7 @@ FROM debian:12-slim@sha256:5ae3c39ebd15e229dcedd5cee596b2497182493d41ff162e824ba
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         bash curl ca-certificates coreutils grep sed gawk findutils \
-        python3 tzdata \
+        python3 tzdata unzip \
     && rm -rf /var/lib/apt/lists/*
 
 # Unprivilegierter Benutzer; UID/GID werden beim Start an die des NAS angepasst.
@@ -20,7 +20,13 @@ COPY docker/app/entrypoint.sh  /app/entrypoint.sh
 COPY downloader.sh             /app/downloader.sh
 RUN chmod 0755 /app/downloader.sh /app/entrypoint.sh /app/webui.py
 
-ENV DATA_DIR=/data \
+# Baudatum und angehefteter Digest landen im Image, damit die Oberfläche
+# selbst warnen kann, wenn das Basis-Image veraltet.
+ARG BUILD_DATE=unbekannt
+ARG BASE_DIGEST=unbekannt
+ENV BUILD_DATE=${BUILD_DATE} \
+    BASE_DIGEST=${BASE_DIGEST} \
+    DATA_DIR=/data \
     DOWNLOADER_BIN=/app/downloader.sh \
     UI_BIND=0.0.0.0 \
     UI_PORT=8080 \

@@ -137,6 +137,14 @@ td.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
       <div class="row"><span>Integrität</span><span id="cSum">–</span></div>
     </div>
     <div class="card">
+      <h2>Absicherung</h2>
+      <div class="row"><span>Verbindung</span><span id="secTls">–</span></div>
+      <div class="row"><span>Zugriff</span><span id="secNet">–</span></div>
+      <div class="row"><span>Inhaltsprüfung</span><span id="secScan">–</span></div>
+      <div class="row"><span>Basis-Image</span><span id="secBase">–</span></div>
+      <div id="secFp" class="help" style="margin-top:8px;word-break:break-all;display:none"></div>
+    </div>
+    <div class="card">
       <h2>Fortschritt</h2>
       <div class="big"><span id="pIdx">0</span> <span style="color:var(--muted);font-size:16px">/ <span id="pTot">0</span></span></div>
       <div class="bar"><i id="pBar" class="ok" style="width:0"></i></div>
@@ -186,6 +194,7 @@ td.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
     <div style="display:flex;gap:8px;margin-bottom:12px">
       <button id="lg-download" class="primary" onclick="logSrc('download')">Downloader</button>
       <button id="lg-runner" onclick="logSrc('runner')">Container</button>
+      <button id="lg-audit" onclick="logSrc('audit')">Zugriffe</button>
     </div>
     <pre id="logBox">–</pre>
   </section>
@@ -255,6 +264,7 @@ function logSrc(s){
   LOGSRC=s;
   $("lg-download").className = s==="download"?"primary":"";
   $("lg-runner").className   = s==="runner"?"primary":"";
+  $("lg-audit").className    = s==="audit"?"primary":"";
   loadLog();
 }
 
@@ -285,6 +295,31 @@ function renderStatus(d){
   $("curBytes").textContent = cur.size ? bytes(cur.bytes)+" / "+bytes(cur.size) : (cur.bytes?bytes(cur.bytes):"–");
   $("curSpeed").textContent = cur.speed ? bytes(cur.speed)+"/s" : "–";
   $("curPhase").textContent = st.phase || "–";
+
+  // Absicherungskarte
+  const dot2 = (ok, txt, warn) =>
+    `<i class="dot ${ok?"ok":(warn?"warn":"err")}"></i> ${esc(txt)}`;
+  $("secTls").innerHTML = d.tls
+    ? dot2(true, "TLS aktiv")
+    : dot2(false, "unverschlüsselt", true);
+  $("secNet").innerHTML = (d.allow_cidr && d.allow_cidr.length)
+    ? dot2(true, d.allow_cidr.join(", "))
+    : dot2(false, "aus jedem Netz", true);
+  $("secScan").innerHTML = d.scan_active
+    ? dot2(true, "eigenes Skript aktiv")
+    : dot2(false, "nur eingebaute Prüfungen", true);
+  const b = d.base||{};
+  if(b.age_days==null){
+    $("secBase").innerHTML = dot2(false, "Alter unbekannt", true);
+  } else if(b.age_days > (b.max_age_days||45)){
+    $("secBase").innerHTML = dot2(false, `${b.age_days} Tage alt – bitte erneuern`);
+  } else {
+    $("secBase").innerHTML = dot2(true, `${b.age_days} Tage alt`);
+  }
+  if(d.tls_fingerprint){
+    $("secFp").style.display="block";
+    $("secFp").textContent = "Zertifikat: " + d.tls_fingerprint;
+  }
 
   const ev = (st.events||[]).slice().reverse();
   $("events").innerHTML = ev.length ? ev.map(e =>

@@ -1,6 +1,9 @@
 # Bewusst debian-slim statt alpine: Alpine bringt BusyBox mit, damit hätte
 # man sich die fehlenden GNU-Werkzeuge in den Container zurückgeholt.
-FROM debian:12-slim
+# Auf einen Digest festgenagelt: das Basis-Image kann sich sonst unter
+# einem ändern. "docker/update-base.sh" holt den aktuellen Digest –
+# etwa monatlich ausführen, sonst frierst du Sicherheitslücken ein.
+FROM debian:12-slim@sha256:5ae3c39ebd15e229dcedd5cee596b2497182493d41ff162e824ba13fc1b2b867
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         bash curl ca-certificates coreutils grep sed gawk findutils \

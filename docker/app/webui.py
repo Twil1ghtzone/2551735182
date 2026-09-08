@@ -12,7 +12,7 @@ Bewusste Entscheidungen:
     Schlüssel werden verworfen.
 """
 
-import hmac, html, json, os, re, secrets, signal, subprocess, sys, threading, time
+import hmac, html, json, os, re, secrets, shutil, signal, subprocess, sys, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
@@ -31,6 +31,7 @@ SESSION_TTL  = int(os.environ.get("UI_SESSION_TTL", "43200"))   # 12 h
 MAX_BODY     = 64 * 1024
 UI_TLS_CERT  = os.environ.get("UI_TLS_CERT", "").strip()
 UI_TLS_KEY   = os.environ.get("UI_TLS_KEY", "").strip()
+UI_TLS_AUTO  = os.environ.get("UI_TLS_AUTO", "1") == "1"
 
 # ─── Erzwungene Sicherheitseinstellungen ─────────────────────
 # Ohne diese Sperre könnte jeder mit Zugriff auf die Oberfläche den
@@ -51,6 +52,7 @@ if ENFORCE_ANON:
 RE_URL   = re.compile(r"^https?://[A-Za-z0-9._\-]+(:\d{1,5})?(/[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%\-]*)?$")
 RE_PROXY = re.compile(r"^socks5h?://[A-Za-z0-9._\-]+:\d{1,5}$")
 RE_PATH  = re.compile(r"^/[A-Za-z0-9 ._\-/]*$")
+RE_FPR   = re.compile(r"^[0-9A-Fa-f ]{40,64}$")
 
 SCHEMA = {
     "DATA_DIR":       ("path",  "/data",  "Ablage",      "Datenverzeichnis",
@@ -61,6 +63,22 @@ SCHEMA = {
                        "Die Seite, aus der die Download-Links gelesen werden.", {}),
     "CHECKSUM_URL":   ("url_opt","",      "Quelle",      "SHA256SUMS-URL",
                        "Ohne sie ist keine echte Integritätsprüfung möglich.", {}),
+    "SIGNATURE_MODE": ("enum",  "off",    "Signatur",    "Signaturprüfung",
+                       "sums = signierte SHA256SUMS, perfile = Signatur je Datei.",
+                       {"choices": ["off", "sums", "perfile"]}),
+    "SIGNATURE_URL":  ("url_opt","",      "Signatur",    "Signatur-URL",
+                       "Leer lassen: dann wird .asc bzw. .sig daneben gesucht.", {}),
+    "TRUSTED_KEY":    ("path_opt","",     "Signatur",    "Schlüsseldatei",
+                       "Dein öffentlicher Schlüssel, z. B. /data/config/trusted.asc. "
+                       "Er muss von dir kommen, nicht vom Server.", {}),
+    "KEY_FINGERPRINT":("fpr",   "",       "Signatur",    "Fingerabdruck",
+                       "Nagelt den Signierer fest. Ohne ihn fällt ein "
+                       "ausgetauschter Schlüssel nicht auf.", {}),
+    "QUARANTINE_KEEP":("int",   "3",      "Grenzen",     "Kopien in Quarantäne",
+                       "Ältere Fassungen derselben Datei werden gelöscht.", {"min":0,"max":100}),
+    "MAX_RETRY_AFTER":("int",   "3600",   "Verhalten",   "Max. erzwungene Pause",
+                       "Obergrenze für ein Retry-After des Servers, in Sekunden.",
+                       {"min":1,"max":86400}),
     "SOCKS_PROXY":    ("proxy", "socks5h://tor:9050", "Anonymität", "SOCKS5-Proxy",
                        "socks5h leitet auch die DNS-Auflösung über den Proxy.", {}),
     "ANON_MODE":      ("bool",  "1",      "Anonymität",  "Ohne Proxy nichts senden",
@@ -100,7 +118,7 @@ SCHEMA = {
     "STALL_SECONDS":  ("int",   "300",    "Verhalten",   "Stillstandserkennung",
                        "Sekunden ohne nennenswerten Durchsatz.", {"min":10,"max":86400}),
 }
-GROUPS = ["Quelle", "Anonymität", "Sicherheit", "Grenzen", "Verhalten", "Ablage"]
+GROUPS = ["Quelle", "Signatur", "Anonymität", "Sicherheit", "Grenzen", "Verhalten", "Ablage"]
 
 
 def validate(key, raw):
@@ -131,6 +149,23 @@ def validate(key, raw):
             return "", None
         if not RE_PROXY.fullmatch(v):
             return None, f"{label}: Format socks5h://host:port"
+        return v, None
+    if kind == "enum":
+        if v in extra.get("choices", []):
+            return v, None
+        return None, f"{label}: nur {', '.join(extra.get('choices', []))}"
+    if kind == "fpr":
+        if not v:
+            return "", None
+        cleaned = v.replace(" ", "")
+        if not RE_FPR.fullmatch(v) or len(cleaned) not in (40, 64):
+            return None, f"{label}: 40 oder 64 Hex-Zeichen erwartet"
+        return cleaned.upper(), None
+    if kind == "path_opt":
+        if not v:
+            return "", None
+        if not RE_PATH.fullmatch(v) or ".." in v:
+            return None, f"{label}: absoluter Pfad ohne Sonderzeichen"
         return v, None
     if kind == "path":
         if not RE_PATH.fullmatch(v) or ".." in v:
@@ -208,6 +243,11 @@ class Runner:
                          # TZ durchreichen, sonst stünden im Protokoll des
                          # Downloaders UTC-Zeiten, während die UI lokale zeigt.
                          "TZ": os.environ.get("TZ", "UTC"),
+                         # Durchgereicht, nicht aus der Oberfläche: der
+                         # Prüfhaken ist nur über die Container-Umgebung
+                         # setzbar.
+                         "SCAN_CMD": os.environ.get("SCAN_CMD", ""),
+                         "SCAN_TIMEOUT": os.environ.get("SCAN_TIMEOUT", "300"),
                          "LC_ALL": "C.UTF-8", "TERM": "dumb"})
             except OSError as exc:
                 return False, f"Start fehlgeschlagen: {exc}"
@@ -281,6 +321,58 @@ def locked_out(ip):
     with SESS_LOCK:
         n, until = FAILS.get(ip, (0, 0))
         return until > time.time()
+
+
+# ─── TLS ─────────────────────────────────────────────────────
+def ensure_tls():
+    """Legt bei Bedarf ein eigenes Zertifikat an und gibt (cert, key) zurück.
+
+    Ohne TLS ginge das Zugangswort im Klartext durchs Netz. Ein selbst
+    erzeugtes Zertifikat schützt zwar nicht vor einem Angreifer, der sich
+    aktiv dazwischenschaltet, aber es beendet das Mitlesen — und der
+    Fingerabdruck im Protokoll erlaubt eine einmalige Kontrolle.
+    """
+    global UI_TLS_CERT, UI_TLS_KEY
+    if UI_TLS_CERT and UI_TLS_KEY:
+        if os.path.exists(UI_TLS_CERT) and os.path.exists(UI_TLS_KEY):
+            return UI_TLS_CERT, UI_TLS_KEY
+        print(f"[webui] WARNUNG: {UI_TLS_CERT} oder {UI_TLS_KEY} fehlt.", flush=True)
+        return "", ""
+    if not UI_TLS_AUTO:
+        return "", ""
+    if not shutil.which("openssl"):
+        print("[webui] Hinweis: openssl fehlt, kein TLS möglich.", flush=True)
+        return "", ""
+
+    cert = os.path.join(CONFIG_DIR, "ui.crt")
+    key = os.path.join(CONFIG_DIR, "ui.key")
+    if not (os.path.exists(cert) and os.path.exists(key)):
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        host = os.environ.get("UI_TLS_HOST", "").strip()
+        san = "DNS:localhost,IP:127.0.0.1"
+        if host:
+            san += f",DNS:{host}" if not host[0].isdigit() else f",IP:{host}"
+        cmd = ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-sha256",
+               "-days", "3650", "-nodes", "-keyout", key, "-out", cert,
+               "-subj", "/CN=secure-downloader", "-addext", f"subjectAltName={san}"]
+        try:
+            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=120)
+            os.chmod(key, 0o600); os.chmod(cert, 0o644)
+            print("[webui] Eigenes TLS-Zertifikat erzeugt (10 Jahre gültig).", flush=True)
+        except (subprocess.SubprocessError, OSError) as exc:
+            print(f"[webui] Zertifikat ließ sich nicht erzeugen: {exc}", flush=True)
+            return "", ""
+
+    try:
+        out = subprocess.run(["openssl", "x509", "-in", cert, "-noout",
+                              "-fingerprint", "-sha256"],
+                             capture_output=True, text=True, timeout=30).stdout.strip()
+        print(f"[webui] Zertifikat-Fingerabdruck (einmal im Browser vergleichen):\n"
+              f"        {out.split('=', 1)[-1]}", flush=True)
+    except (subprocess.SubprocessError, OSError):
+        pass
+    return cert, key
 
 
 # ─── HTTP ────────────────────────────────────────────────────
@@ -404,7 +496,7 @@ class Handler(BaseHTTPRequestHandler):
                 ],
                 "groups": GROUPS,
                 "enforce_anon": ENFORCE_ANON,
-                "tls": bool(UI_TLS_CERT and UI_TLS_KEY),
+                "tls": bool(globals().get("TLS_ACTIVE")),
             })
         if path == "/api/log":
             q = parse_qs(urlparse(self.path).query)
@@ -434,7 +526,7 @@ class Handler(BaseHTTPRequestHandler):
                 tok, csrf = new_session()
                 with SESS_LOCK:
                     FAILS.pop(ip, None)
-                secure = "; Secure" if (UI_TLS_CERT and UI_TLS_KEY) else ""
+                secure = "; Secure" if globals().get("TLS_ACTIVE") else ""
                 return self._json(200, {"ok": True, "csrf": csrf}, extra=[
                     ("Set-Cookie",
                      f"sid={tok}; HttpOnly; SameSite=Strict{secure}; Path=/; Max-Age={SESSION_TTL}")])
@@ -512,17 +604,19 @@ def main():
     srv = ThreadingHTTPServer((BIND_HOST, BIND_PORT), Handler)
     srv.daemon_threads = True
     scheme = "http"
-    if UI_TLS_CERT and UI_TLS_KEY:
+    cert, key = ensure_tls()
+    if cert and key:
         import ssl
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ctx.minimum_version = ssl.TLSVersion.TLSv1_2
-        ctx.load_cert_chain(UI_TLS_CERT, UI_TLS_KEY)
+        ctx.load_cert_chain(cert, key)
         srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
         scheme = "https"
+        globals()["TLS_ACTIVE"] = True
     else:
-        print("[webui] Hinweis: ohne TLS wird das Zugangswort im Klartext "
-              "durchs Netz geschickt. UI_TLS_CERT/UI_TLS_KEY setzen oder "
-              "einen HTTPS-Reverse-Proxy davorstellen.", flush=True)
+        print("[webui] WARNUNG: ohne TLS geht das Zugangswort im Klartext "
+              "durchs Netz. UI_TLS_AUTO=1 erzeugt eines, oder einen "
+              "HTTPS-Reverse-Proxy davorstellen.", flush=True)
     print(f"[webui] bereit auf {scheme}://{BIND_HOST}:{BIND_PORT}", flush=True)
     try:
         srv.serve_forever()

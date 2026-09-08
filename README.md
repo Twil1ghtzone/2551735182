@@ -14,13 +14,21 @@ Docker-Fassung und Weboberfläche. Ausgelegt auf lange Läufe (TB-Bereich)
 - Optional: keine URLs im Protokoll, Dateinamen als Hash
 
 **Integrität**
+- **GPG-Signaturprüfung** gegen einen Schlüssel, den du mitbringst: entweder
+  eine signierte `SHA256SUMS` oder eine Signatur je Datei. Der erwartete
+  Fingerabdruck lässt sich festnageln, damit ein ausgetauschter Schlüssel
+  auffällt. Ohne gültige Signatur wird nichts geladen.
 - Prüfung gegen eine `SHA256SUMS`-Datei der Quelle, pfadgenau zugeordnet
 - Unverifizierte Daten landen nie im Zielverzeichnis (getrenntes Staging)
 - Magic-Byte-Prüfung: Inhalt muss zur Dateiendung passen
+- Haken für eine eigene Inhaltsprüfung (Virenscanner) vor der Übernahme
 - Auffälliges kommt in Quarantäne statt in den Downloadordner
 
 **Robustheit**
 - Fortsetzen nach Abbruch, Neustart und tagelangen Serverausfällen
+- `Retry-After` des Servers wird beachtet – der häufigste Grund für Sperren
+- Fehlerregister mit wachsendem Abstand: dauerhaft kaputte Dateien werden
+  nicht bei jedem Lauf erneut geladen
 - Abbrüche zählen nur ohne Fortschritt – wachsende Dateien werden endlos fortgesetzt
 - Atomares Locking über `mkdir` (auch auf NFS/SMB), mit Heartbeat
 - Schnelles Überspringen fertiger Dateien ohne erneutes Hashen
@@ -46,6 +54,11 @@ Wichtige Optionen:
     --tor             Proxy auf socks5h://127.0.0.1:9050
     --checksums URL   SHA256SUMS der Quelle (dringend empfohlen)
     --require-hash    Dateien ohne Quell-Prüfsumme ablehnen
+    --signature MODUS off | sums | perfile
+    --key DATEI       dein öffentlicher Schlüssel
+    --key-fp FINGER   erwarteter Fingerabdruck des Signierers
+    --scan DATEI      eigene Inhaltsprüfung vor der Übernahme
+    --retry-failed    gesperrte Fehlschläge sofort erneut versuchen
     --delay SEKUNDEN  Pause zwischen Dateien
     --no-dashboard    Zeilenlogging statt TUI (Cron/NAS)
 ```
@@ -81,8 +94,9 @@ BusyBox (NAS-Firmware) gibt es Fallbacks für fehlendes `stat -c`,
 
 ## Grenzen
 
-- Die Prüfsumme belegt nur, dass die Datei unverfälscht von der Quelle
-  stammt. Ist die Quelle selbst bösartig, hilft sie nicht.
+- Ohne `--signature` belegt die Prüfsumme nur, dass die Datei unverfälscht
+  von der Quelle stammt – sie kommt vom selben Server. Erst die Signatur
+  gegen deinen Schlüssel macht daraus eine Aussage über die Herkunft.
 - Der Schnellabgleich erkennt lokale Manipulation an Größe und Zeitstempel.
   Wer beides exakt fälscht, kommt daran vorbei – `--verify-all` hasht alles neu.
 - Der Inhalt einer Datei wird nicht auf Schadcode geprüft.

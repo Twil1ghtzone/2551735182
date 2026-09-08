@@ -17,13 +17,21 @@ set -euo pipefail
 umask 077
 export LC_ALL=C
 
-VERSION="3.3"
+VERSION="3.4"
 SELF="${0##*/}"
 
 # ─── Vorgaben (überschreibbar per Konfig-Datei und CLI) ──────
 BASE_URL=""
 ARCHIVE_URL=""
 CHECKSUM_URL=""
+SIGNATURE_MODE="off"            # off | sums | perfile
+SIGNATURE_URL=""                # Signatur zur SHA256SUMS (leer = <SUMS>.asc)
+TRUSTED_KEY=""                  # dein öffentlicher Schlüssel (ASCII oder binär)
+KEY_FINGERPRINT=""              # Fingerabdruck festnageln (dringend empfohlen)
+# Bewusst aus der Umgebung: SCAN_CMD gehört NICHT in die Weboberfläche,
+# ein Eingabefeld für ein auszuführendes Programm wäre eine Lücke.
+SCAN_CMD="${SCAN_CMD:-}"        # ausführbare Datei für eigene Inhaltsprüfung
+SCAN_TIMEOUT="${SCAN_TIMEOUT:-300}"   # Zeitgrenze, danach gilt es als Befund
 DATA_DIR=""                     # Wurzel für ALLE Daten (NAS-Pfad)
 SOCKS_PROXY=""
 ANON_MODE=1                     # 1 = ohne funktionierenden Proxy kein Traffic
@@ -53,6 +61,9 @@ MAX_ATTEMPTS=3
 RETRY_BACKOFF=30
 REQUEST_DELAY=1                 # Pause zwischen Dateien: schützt davor, dass
                                 # der Mirror einen als Bot aussperrt
+MAX_RETRY_AFTER=3600            # Obergrenze für vom Server verlangte Wartezeit
+FAIL_BACKOFF="3600 21600 86400 604800"   # 1 h, 6 h, 24 h, 7 d
+QUARANTINE_KEEP=3               # Kopien je Datei in der Quarantäne
 DASHBOARD="auto"
 DRY_RUN=0
 # Generischer UA: ein eigener Name wäre ein eindeutiger Fingerabdruck.
@@ -80,6 +91,12 @@ Quelle
       --archive-url URL   Seite, von der Links extrahiert werden
       --checksums URL     SHA256SUMS-Datei der Quelle (dringend empfohlen)
 
+Signaturen (echte Herkunftsprüfung)
+      --signature MODUS   off | sums | perfile
+      --sig-url URL       Signatur zur SHA256SUMS (Vorgabe: <SUMS>.asc)
+      --key DATEI         dein öffentlicher Schlüssel (ASCII-Panzer oder binär)
+      --key-fp FINGER     erwarteter Fingerabdruck des Signierers
+
 Anonymität
       --proxy URL         SOCKS5-Proxy, z. B. socks5h://127.0.0.1:9050
       --tor               Kurzform für --proxy socks5h://127.0.0.1:9050
@@ -92,6 +109,9 @@ Sicherheit
       --allow-http        HTTP ohne TLS zulassen (für .onion nötig)
       --no-type-check     Dateityp-Prüfung (Magic Bytes) abschalten
       --require-hash      Dateien ohne Quell-Prüfsumme ablehnen
+      --scan DATEI        eigene Prüfung vor der Übernahme (z. B. Virenscanner);
+                          ausführbare Datei, bekommt den Dateipfad, Rückgabe
+                          ungleich 0 schiebt die Datei in Quarantäne
       --max-size BYTES    Obergrenze pro Datei in Bytes (0 = keine)
       --speed BYTES/s     Bandbreite drosseln (0 = unbegrenzt)
       --delay SEKUNDEN    Pause zwischen Dateien (gegen Aussperrung)
@@ -100,6 +120,7 @@ Sicherheit
 Betrieb
       --refresh           URL-Liste neu einlesen (neue Dateien erkennen)
       --verify-all        Alle fertigen Dateien neu durchhashen (langsam)
+      --retry-failed      Gesperrte Fehlschläge sofort erneut versuchen
       --dry-run           Nur auflisten, nichts herunterladen
       --no-dashboard      Zeilenlogging statt TUI (für Cron/NAS-Scheduler)
   -h, --help              Diese Hilfe
@@ -159,7 +180,7 @@ CONF
 
 # ─── Konfiguration einlesen (parsen, NICHT sourcen) ──────────
 # 'source' würde beliebigen Code aus der Datei ausführen.
-ALLOWED_KEYS=" BASE_URL ARCHIVE_URL CHECKSUM_URL DATA_DIR SOCKS_PROXY ANON_MODE REQUIRE_HTTPS ALLOW_ONION LOG_URLS OBFUSCATE_NAMES STRICT_TYPE LEAK_CHECK CHECK_INTERVAL MAX_WAIT_CYCLES MAX_DOWNLOAD_SPEED MAX_FILESIZE MIN_FREE_BYTES DOWNLOAD_TIMEOUT MAX_REDIRS MAX_ATTEMPTS RETRY_BACKOFF DASHBOARD USER_AGENT REQUIRE_HASH URL_LIST_TTL LOCK_MAX_AGE MAX_WAIT_INTERVAL STALL_BYTES STALL_SECONDS MAX_RESUMES VERIFY_ALL REQUEST_DELAY "
+ALLOWED_KEYS=" BASE_URL ARCHIVE_URL CHECKSUM_URL DATA_DIR SOCKS_PROXY ANON_MODE REQUIRE_HTTPS ALLOW_ONION LOG_URLS OBFUSCATE_NAMES STRICT_TYPE LEAK_CHECK CHECK_INTERVAL MAX_WAIT_CYCLES MAX_DOWNLOAD_SPEED MAX_FILESIZE MIN_FREE_BYTES DOWNLOAD_TIMEOUT MAX_REDIRS MAX_ATTEMPTS RETRY_BACKOFF DASHBOARD USER_AGENT REQUIRE_HASH URL_LIST_TTL LOCK_MAX_AGE MAX_WAIT_INTERVAL STALL_BYTES STALL_SECONDS MAX_RESUMES VERIFY_ALL REQUEST_DELAY MAX_RETRY_AFTER QUARANTINE_KEEP SIGNATURE_MODE SIGNATURE_URL TRUSTED_KEY KEY_FINGERPRINT SCAN_CMD SCAN_TIMEOUT "
 
 load_config() {
     local file="$1"
@@ -213,6 +234,7 @@ load_config "${CONFIG_FILE:-$DEFAULT_CONFIG}"
 
 PRINT_CONFIG=0
 FORCE_REFRESH=0
+RETRY_FAILED=0
 while [ $# -gt 0 ]; do
     case "$1" in
         -d|--dir)          DATA_DIR="${2:?Pfad fehlt}"; shift 2 ;;
@@ -220,6 +242,10 @@ while [ $# -gt 0 ]; do
         --base-url)        BASE_URL="${2:?}"; shift 2 ;;
         --archive-url)     ARCHIVE_URL="${2:?}"; shift 2 ;;
         --checksums)       CHECKSUM_URL="${2:?}"; shift 2 ;;
+        --signature)       SIGNATURE_MODE="${2:?}"; shift 2 ;;
+        --sig-url)         SIGNATURE_URL="${2:?}"; shift 2 ;;
+        --key)             TRUSTED_KEY="${2:?}"; shift 2 ;;
+        --key-fp)          KEY_FINGERPRINT="${2:?}"; shift 2 ;;
         --proxy)           SOCKS_PROXY="${2:?}"; shift 2 ;;
         --tor)             SOCKS_PROXY="socks5h://127.0.0.1:9050"; shift ;;
         --no-anon)         ANON_MODE=0; shift ;;
@@ -229,8 +255,10 @@ while [ $# -gt 0 ]; do
         --allow-http)      REQUIRE_HTTPS=0; shift ;;
         --no-type-check)   STRICT_TYPE=0; shift ;;
         --require-hash)    REQUIRE_HASH=1; shift ;;
+        --scan)            SCAN_CMD="${2:?}"; shift 2 ;;
         --refresh)         FORCE_REFRESH=1; shift ;;
         --verify-all)      VERIFY_ALL=1; shift ;;
+        --retry-failed)    RETRY_FAILED=1; shift ;;
         --max-size)        MAX_FILESIZE="${2:?}"; shift 2 ;;
         --speed)           MAX_DOWNLOAD_SPEED="${2:?}"; shift 2 ;;
         --delay)           REQUEST_DELAY="${2:?}"; shift 2 ;;
@@ -396,6 +424,33 @@ if [ -z "${BASH_VERSINFO:-}" ] || [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
     fail_early "bash >= 4 erforderlich (gefunden: ${BASH_VERSION:-unbekannt})."
 fi
 
+if [ -n "$SCAN_CMD" ]; then
+    # Bewusst ein PFAD auf ein Programm, keine Befehlszeile: es wird nie
+    # eine Zeichenkette an eine Shell übergeben. Aus dem gleichen Grund ist
+    # SCAN_CMD nicht in der Weboberfläche einstellbar – ein Eingabefeld
+    # dafür wäre eine Fernausführungslücke.
+    [ -f "$SCAN_CMD" ] || fail_early "Prüfprogramm nicht gefunden: $SCAN_CMD"
+    [ -x "$SCAN_CMD" ] || fail_early "Prüfprogramm ist nicht ausführbar: $SCAN_CMD"
+    case "$SCAN_CMD" in /*) ;; *) fail_early "--scan braucht einen absoluten Pfad." ;; esac
+fi
+
+case "$SIGNATURE_MODE" in
+    off|sums|perfile) ;;
+    *) fail_early "SIGNATURE_MODE muss off, sums oder perfile sein." ;;
+esac
+if [ "$SIGNATURE_MODE" != "off" ]; then
+    command -v gpgv >/dev/null 2>&1 || fail_early "gpgv fehlt – ohne es keine Signaturprüfung."
+    [ -n "$TRUSTED_KEY" ] || fail_early "Signaturprüfung verlangt einen Schlüssel (--key DATEI).
+  Der Schlüssel muss von DIR kommen, nicht vom Server – das ist der Vertrauensanker."
+    [ -f "$TRUSTED_KEY" ] || fail_early "Schlüsseldatei nicht gefunden: $TRUSTED_KEY"
+    if [ -z "$KEY_FINGERPRINT" ]; then
+        echo "Warnung: kein --key-fp gesetzt. Ein ausgetauschter Schlüssel fiele nicht auf." >&2
+    fi
+    if [ "$SIGNATURE_MODE" = "sums" ] && [ -z "$CHECKSUM_URL" ]; then
+        fail_early "SIGNATURE_MODE=sums braucht eine --checksums URL."
+    fi
+fi
+
 [ -n "$DATA_DIR" ] || fail_early "Kein Datenverzeichnis. Nutze --dir /pfad oder trage DATA_DIR in die Konfiguration ein."
 case "$DATA_DIR" in /*) ;; *) DATA_DIR="$(pwd)/$DATA_DIR" ;; esac
 
@@ -446,6 +501,7 @@ STAGING_DIR="${DATA_DIR}/state/staging"
 CHECKSUM_DIR="${DATA_DIR}/state/checksums"
 QUARANTINE_DIR="${DATA_DIR}/quarantine"
 DONE_DIR="${DATA_DIR}/state/done"
+FAIL_DIR="${DATA_DIR}/state/failed"
 STATUS_FILE="${DATA_DIR}/state/status.json"
 LOG_FILE="${DATA_DIR}/download.log"
 LOCK_DIR="${DATA_DIR}/.lock.d"
@@ -466,7 +522,7 @@ assert_no_symlink "$DATA_DIR"
 mkdir -p "$DATA_DIR" || fail_early "Kann $DATA_DIR nicht anlegen (Rechte? NAS-Share gemountet?)"
 [ -w "$DATA_DIR" ] || fail_early "$DATA_DIR ist nicht beschreibbar."
 
-for d in "$DOWNLOAD_DIR" "$STATE_DIR" "$STAGING_DIR" "$CHECKSUM_DIR" "$QUARANTINE_DIR" "$DONE_DIR"; do
+for d in "$DOWNLOAD_DIR" "$STATE_DIR" "$STAGING_DIR" "$CHECKSUM_DIR" "$QUARANTINE_DIR" "$DONE_DIR" "$FAIL_DIR"; do
     assert_no_symlink "$d"
     mkdir -p "$d" || fail_early "Kann $d nicht anlegen."
 done
@@ -709,6 +765,115 @@ lock_heartbeat() {
     return 0
 }
 
+# ─── Signaturprüfung ─────────────────────────────────────────
+# Die Prüfsummendatei kommt vom selben Server wie die Dateien. Erst eine
+# Signatur gegen einen Schlüssel, den DU mitbringst, macht daraus eine
+# Aussage über die Herkunft statt nur über die Übertragung.
+KEYRING=""
+
+prepare_keyring() {
+    [ "$SIGNATURE_MODE" != "off" ] || return 0
+    KEYRING="${STATE_DIR}/trusted.gpg"
+    assert_no_symlink "$KEYRING"
+    if head -c 40 "$TRUSTED_KEY" 2>/dev/null | grep -q 'BEGIN PGP PUBLIC KEY'; then
+        # ASCII-Panzer auspacken – braucht kein gnupg, nur coreutils.
+        if ! sed -e '1,/^$/d' -e '/^-----END/,$d' -e '/^=/d' "$TRUSTED_KEY" \
+             | tr -d '\n' | base64 -d > "$KEYRING" 2>/dev/null; then
+            die "Schlüsseldatei ließ sich nicht auspacken: $TRUSTED_KEY"
+        fi
+    else
+        cp -f "$TRUSTED_KEY" "$KEYRING" || die "Schlüssel nicht lesbar: $TRUSTED_KEY"
+    fi
+    chmod 600 "$KEYRING" 2>/dev/null || true
+    [ -s "$KEYRING" ] || die "Schlüsselbund ist leer: $TRUSTED_KEY"
+    log "INFO" "Signaturprüfung aktiv (Modus: $SIGNATURE_MODE)."
+    return 0
+}
+
+# Prüft <signatur> gegen <datei>. Rückgabe 0 nur bei gültiger Signatur
+# UND – falls gesetzt – passendem Fingerabdruck.
+gpg_verify() {
+    local sig="$1" data="$2" label="$3"
+    local out rc=0
+    out=$(gpgv --status-fd 1 --keyring "$KEYRING" "$sig" "$data" 2>/dev/null) || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        log "ERROR" "Signatur UNGÜLTIG für $label"
+        return 1
+    fi
+    local fp
+    fp=$(printf '%s' "$out" | grep -m1 '^\[GNUPG:\] VALIDSIG' | awk '{print $3}')
+    if [ -z "$fp" ]; then
+        log "ERROR" "Signatur für $label lieferte keinen Fingerabdruck."
+        return 1
+    fi
+    if [ -n "$KEY_FINGERPRINT" ]; then
+        local want got
+        want=$(printf '%s' "$KEY_FINGERPRINT" | tr -d ' :' | tr 'a-f' 'A-F')
+        got=$(printf '%s' "$fp" | tr -d ' :' | tr 'a-f' 'A-F')
+        if [ "$want" != "$got" ]; then
+            log "ERROR" "Signatur von FREMDEM Schlüssel für $label ($got, erwartet $want)"
+            return 1
+        fi
+    fi
+    log "OK" "Signatur bestätigt für $label (Schlüssel ${fp: -16})"
+    return 0
+}
+
+# Lädt die Signatur zu einer Datei. Probiert .asc und .sig.
+fetch_signature() {
+    local base_url="$1" target="$2"
+    local suffix
+    for suffix in .asc .sig .sign; do
+        if curl "${CURL_ARGS[@]}" --fail --max-time 60 --max-filesize 1048576 \
+               -o "$target" "${base_url}${suffix}" 2>/dev/null; then
+            printf '%s' "$suffix"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# ─── Fehlerregister ──────────────────────────────────────────
+# Ohne dieses Register würde eine dauerhaft kaputte Datei bei JEDEM Lauf
+# neu geladen und neu verworfen – bei großen Beständen reine Verschwendung.
+fail_record() {
+    local name="$1" reason="$2"
+    local rec="${FAIL_DIR}/${name}.fail"
+    local count=0 _next _reason
+    if [ -f "$rec" ]; then
+        read -r count _next _reason < "$rec" 2>/dev/null || count=0
+        case "$count" in *[!0-9]*|'') count=0 ;; esac
+    fi
+    count=$((count + 1))
+    local i=1 wait_s=3600 w
+    for w in $FAIL_BACKOFF; do
+        wait_s="$w"
+        [ "$i" -ge "$count" ] && break
+        i=$((i + 1))
+    done
+    printf '%s %s %s\n' "$count" "$(( $(date +%s) + wait_s ))" "$reason" > "$rec" 2>/dev/null || true
+    log "INFO" "$name: $count. Fehlschlag – nächster Versuch frühestens in $(human_time "$wait_s")."
+    return 0
+}
+
+fail_blocked() {
+    local name="$1"
+    [ "$RETRY_FAILED" -eq 0 ] || return 1
+    local rec="${FAIL_DIR}/${name}.fail"
+    [ -f "$rec" ] || return 1
+    local count next reason
+    read -r count next reason < "$rec" 2>/dev/null || return 1
+    case "$next" in *[!0-9]*|'') return 1 ;; esac
+    local now; now=$(date +%s)
+    if [ "$now" -lt "$next" ]; then
+        log "SKIP" "$name (gesperrt nach $count Fehlversuchen, noch $(human_time "$((next - now))"))"
+        return 0
+    fi
+    return 1
+}
+
+fail_clear() { rm -f "${FAIL_DIR}/${1}.fail" 2>/dev/null || true; return 0; }
+
 # ─── Erwartete Prüfsummen ────────────────────────────────────
 declare -A EXPECTED_HASH=()
 load_expected_hashes() {
@@ -721,6 +886,22 @@ load_expected_hashes() {
     assert_no_symlink "$sums"
     curl "${CURL_ARGS[@]}" --fail --max-time 60 --max-filesize 5242880 -o "$sums" "$CHECKSUM_URL" \
         || die "Prüfsummendatei nicht ladbar: $(redact "$CHECKSUM_URL")"
+
+    if [ "$SIGNATURE_MODE" = "sums" ]; then
+        local sigfile="${STATE_DIR}/SHA256SUMS.sig"
+        assert_no_symlink "$sigfile"
+        if [ -n "$SIGNATURE_URL" ]; then
+            curl "${CURL_ARGS[@]}" --fail --max-time 60 --max-filesize 1048576 \
+                 -o "$sigfile" "$SIGNATURE_URL" \
+                 || die "Signatur nicht ladbar: $(redact "$SIGNATURE_URL")"
+        else
+            fetch_signature "$CHECKSUM_URL" "$sigfile" >/dev/null \
+                 || die "Keine Signatur zur Prüfsummendatei gefunden (.asc/.sig neben $(redact "$CHECKSUM_URL"))."
+        fi
+        # Fail-closed: ohne gültige Signatur wird nichts geladen.
+        gpg_verify "$sigfile" "$sums" "SHA256SUMS" \
+            || die "Prüfsummendatei ist NICHT vertrauenswürdig – Abbruch ohne Download."
+    fi
     local hash name count=0
     while read -r hash name; do
         [[ "$hash" =~ ^[a-fA-F0-9]{64}$ ]] || continue
@@ -730,6 +911,9 @@ load_expected_hashes() {
     done < "$sums"
     [ "$count" -gt 0 ] || die "Prüfsummendatei enthält keine gültigen SHA256-Einträge."
     ST_CHECKSUM_MODE="SHA256 gegen Quelle (${count})"
+    if [ "$SIGNATURE_MODE" = "sums" ]; then
+        ST_CHECKSUM_MODE="SHA256, signiert geprüft (${count})"
+    fi
     log "INFO" "$count erwartete Prüfsummen geladen."
     return 0
 }
@@ -938,6 +1122,51 @@ quarantine() {
     local dest="${QUARANTINE_DIR}/${name}.$(date +%s)"
     mv -f "$f" "$dest" 2>/dev/null && chmod 400 "$dest" 2>/dev/null || rm -f "$f"
     log "WARN" "In Quarantäne: $name ($why)"
+    # Nur die neuesten Kopien behalten, sonst sammelt sich bei jedem Lauf
+    # eine weitere Fassung derselben kaputten Datei an.
+    if [ "${QUARANTINE_KEEP:-3}" -gt 0 ]; then
+        local old victim
+        old=$(ls -1t "${QUARANTINE_DIR}/${name}."* 2>/dev/null | tail -n +"$((QUARANTINE_KEEP + 1))" || true)
+        if [ -n "$old" ]; then
+            printf '%s\n' "$old" | while IFS= read -r victim; do
+                [ -n "$victim" ] && rm -f "$victim" 2>/dev/null
+            done
+        fi
+    fi
+    return 0
+}
+
+# Liest Retry-After aus den Kopfzeilen des letzten Versuchs. Erlaubt sind
+# Sekundenangaben und HTTP-Datumsangaben; beides wird gedeckelt.
+retry_after_hint() {
+    local hdr="$1"
+    [ -f "$hdr" ] || return 0
+    local code
+    code=$(grep -oE '^HTTP/[0-9.]+ [0-9]{3}' "$hdr" 2>/dev/null | tail -1 | awk '{print $2}')
+    case "$code" in
+        429|503) ;;
+        *) return 0 ;;
+    esac
+    local raw
+    raw=$(grep -i '^retry-after:' "$hdr" 2>/dev/null | tail -1 | cut -d: -f2- | tr -d '\r' \
+          | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+    local secs=""
+    if [ -n "$raw" ]; then
+        if printf '%s' "$raw" | grep -qE '^[0-9]+$'; then
+            secs="$raw"
+        else
+            local target now
+            target=$(date -d "$raw" +%s 2>/dev/null || true)
+            if [ -n "$target" ]; then
+                now=$(date +%s); secs=$(( target - now ))
+                [ "$secs" -lt 0 ] && secs=0
+            fi
+        fi
+    fi
+    [ -n "$secs" ] || secs="$RETRY_BACKOFF"
+    [ "$secs" -gt "$MAX_RETRY_AFTER" ] && secs="$MAX_RETRY_AFTER"
+    [ "$secs" -lt 1 ] && secs=1
+    printf '%s' "$secs"
     return 0
 }
 
@@ -955,11 +1184,16 @@ download_file() {
 
     ST_FILE="$filename"; ST_CUR_BYTES=0; ST_CUR_SIZE=0; ST_SPEED=0; ST_ATTEMPT=0
 
+    if fail_blocked "$filename"; then
+        ST_SKIPPED=$((ST_SKIPPED + 1))
+        return 0
+    fi
+
     # Symlink-Schutz an jeder Schreibstelle
     for p in "$final" "$part" "$metafile" "$checksum"; do
         if [ -L "$p" ]; then
             log "ERROR" "Symlink entdeckt statt Datei: $p – übersprungen."
-            ST_FAILED=$((ST_FAILED + 1)); return 1
+            ST_FAILED=$((ST_FAILED + 1)); fail_record "$filename" "Symlink"; return 1
         fi
     done
 
@@ -1002,6 +1236,7 @@ download_file() {
         if [ "$MAX_FILESIZE" -gt 0 ] && [ "$R_SIZE" -gt "$MAX_FILESIZE" ]; then
             ST_FAILED=$((ST_FAILED + 1))
             log "ERROR" "$filename überschreitet Größenlimit – übersprungen."
+            fail_record "$filename" "zu gross"
             rm -f "$part" "$metafile"; return 1
         fi
         free_space_ok "$R_SIZE" || die "Zu wenig freier Speicher in $DATA_DIR."
@@ -1017,6 +1252,7 @@ download_file() {
     log "START" "Lade: $filename"
     local success=false stalled=0 rounds=0 before_bytes after_bytes
     local errfile="${STATE_DIR}/curl.err" effurl="${STATE_DIR}/curl.url"
+    local hdrfile="${STATE_DIR}/curl.hdr"
     # Abbrüche zählen nur, wenn KEIN Fortschritt entstanden ist. Eine
     # 500-GB-Datei über eine wackelige Leitung wird so beliebig oft
     # fortgesetzt, solange sie tatsächlich wächst.
@@ -1032,6 +1268,7 @@ download_file() {
         local dl_args=(--fail
                        --speed-limit "$STALL_BYTES" --speed-time "$STALL_SECONDS"
                        --retry 2 --retry-delay 10 -C -
+                       --dump-header "$hdrfile"
                        -w '%{url_effective}')
         # Ein hartes --max-time würde große Dateien mitten im Transfer
         # abschneiden; stattdessen bricht curl nur bei echtem Stillstand ab.
@@ -1073,7 +1310,8 @@ download_file() {
             rm -f "$part" "$metafile"
             ST_FAILED=$((ST_FAILED + 1))
             case "$aborted" in
-                groesse) log "ERROR" "$filename überschreitet das Größenlimit – abgebrochen." ;;
+                groesse) log "ERROR" "$filename überschreitet das Größenlimit – abgebrochen."
+                         fail_record "$filename" "zu gross" ;;
                 platz)   die "Freier Speicher unter dem Mindestwert – Abbruch." ;;
             esac
             return 1
@@ -1092,6 +1330,17 @@ download_file() {
         fi
         case "$rc" in 33|36) rm -f "$part" ;; esac
 
+        # Sagt der Server selbst, wie lange er Ruhe will, halten wir uns
+        # daran. Das ist der häufigste Grund für eine Aussperrung.
+        local wait_hint
+        wait_hint=$(retry_after_hint "$hdrfile")
+        if [ -n "$wait_hint" ]; then
+            log "WARN" "Server verlangt Pause (Retry-After): $(human_time "$wait_hint")"
+            interruptible_sleep "$wait_hint"
+            [ "$stalled" -gt 0 ] && stalled=$((stalled - 1))
+            continue
+        fi
+
         # Ist der Server ganz weg, wird gewartet statt Versuche zu verbrennen.
         if ! check_archive; then
             ST_PHASE="Server offline – warte"
@@ -1102,11 +1351,12 @@ download_file() {
             interruptible_sleep "$RETRY_BACKOFF"
         fi
     done
-    rm -f "$errfile"
+    rm -f "$errfile" "$hdrfile"
 
     if [ "$success" != true ]; then
         ST_FAILED=$((ST_FAILED + 1))
         log "ERROR" "Endgültig fehlgeschlagen: $filename"
+        fail_record "$filename" "Download"
         return 1
     fi
 
@@ -1119,6 +1369,7 @@ download_file() {
         if [ "$eff_host" != "$base_host" ]; then
             ST_FAILED=$((ST_FAILED + 1))
             log "ERROR" "Umleitung auf fremden Host ($eff_host) – verworfen."
+            fail_record "$filename" "Umleitung"
             rm -f "$part" "$metafile"; return 1
         fi
     fi
@@ -1127,7 +1378,28 @@ download_file() {
     if [ "$ST_CUR_SIZE" -gt 0 ] && [ "$got" -ne "$ST_CUR_SIZE" ]; then
         ST_FAILED=$((ST_FAILED + 1))
         log "ERROR" "$filename unvollständig ($got/$ST_CUR_SIZE Bytes) – verworfen."
+        fail_record "$filename" "unvollstaendig"
         rm -f "$part"; return 1
+    fi
+
+    # Signatur je Datei prüfen, bevor irgendetwas übernommen wird.
+    if [ "$SIGNATURE_MODE" = "perfile" ]; then
+        local sigfile="${STAGING_DIR}/${filename}.sig"
+        assert_no_symlink "$sigfile"
+        if ! fetch_signature "$url" "$sigfile" >/dev/null; then
+            ST_FAILED=$((ST_FAILED + 1))
+            log "ERROR" "$filename: keine Signatur gefunden (.asc/.sig)."
+            quarantine "$part" "$filename" "ohne Signatur"
+            fail_record "$filename" "ohne Signatur"
+            rm -f "$metafile" "$sigfile"; return 1
+        fi
+        if ! gpg_verify "$sigfile" "$part" "$filename"; then
+            ST_FAILED=$((ST_FAILED + 1))
+            quarantine "$part" "$filename" "Signatur ungueltig"
+            fail_record "$filename" "Signatur"
+            rm -f "$metafile" "$sigfile"; return 1
+        fi
+        rm -f "$sigfile"
     fi
 
     local hash vrc=0
@@ -1136,6 +1408,7 @@ download_file() {
         ST_FAILED=$((ST_FAILED + 1))
         log "ERROR" "PRÜFSUMME FALSCH: $filename"
         quarantine "$part" "$filename" "Hash weicht ab"
+        fail_record "$filename" "Pruefsumme"
         rm -f "$metafile"; return 1
     fi
 
@@ -1143,6 +1416,7 @@ download_file() {
         ST_FAILED=$((ST_FAILED + 1))
         log "ERROR" "$filename: keine Quell-Prüfsumme vorhanden (--require-hash)."
         quarantine "$part" "$filename" "nicht verifizierbar"
+        fail_record "$filename" "ohne Pruefsumme"
         rm -f "$metafile"; return 1
     fi
 
@@ -1150,7 +1424,31 @@ download_file() {
         ST_FAILED=$((ST_FAILED + 1))
         log "ERROR" "$filename: Inhalt passt nicht zur Endung (getarnte Datei?)"
         quarantine "$part" "$filename" "Typ passt nicht zur Endung"
+        fail_record "$filename" "Dateityp"
         rm -f "$metafile"; return 1
+    fi
+
+    if [ -n "$SCAN_CMD" ]; then
+        ST_PHASE="prüfe Inhalt: $filename"
+        render
+        local src=0
+        if command -v timeout >/dev/null 2>&1; then
+            timeout "$SCAN_TIMEOUT" "$SCAN_CMD" "$part" >/dev/null 2>&1 || src=$?
+        else
+            "$SCAN_CMD" "$part" >/dev/null 2>&1 || src=$?
+        fi
+        if [ "$src" -ne 0 ]; then
+            ST_FAILED=$((ST_FAILED + 1))
+            if [ "$src" -eq 124 ]; then
+                log "ERROR" "$filename: Inhaltsprüfung lief in die Zeitgrenze."
+            else
+                log "ERROR" "$filename: Inhaltsprüfung meldet Befund (Rückgabe $src)."
+            fi
+            quarantine "$part" "$filename" "Inhaltspruefung"
+            fail_record "$filename" "Inhaltspruefung"
+            rm -f "$metafile"; return 1
+        fi
+        log "OK" "$filename: Inhaltsprüfung bestanden."
     fi
 
     chmod 400 "$part" 2>/dev/null || true
@@ -1161,6 +1459,7 @@ download_file() {
         > "${DONE_DIR}/${filename}.done" 2>/dev/null || true
     rm -f "$metafile"
 
+    fail_clear "$filename"
     ST_DONE=$((ST_DONE + 1)); ST_BYTES_SESSION=$((ST_BYTES_SESSION + got))
     if [ "$vrc" -eq 0 ] && [ ${#EXPECTED_HASH[@]} -gt 0 ]; then
         log "OK" "$filename – Prüfsumme der Quelle bestätigt."
@@ -1301,6 +1600,9 @@ render() {
     printf '    Ziel-Host      %s %sHTTP %s%s\n' "$(dot "$ST_HOST")"    "$C_DIM" "$ST_HOST_CODE" "$C_RESET"
     printf '    Archiv-Seite   %s %sHTTP %s%s\n' "$(dot "$ST_ARCHIVE")" "$C_DIM" "$ST_ARCHIVE_CODE" "$C_RESET"
     printf '    Integrität     %s%s%s\n' "$C_DIM" "$ST_CHECKSUM_MODE" "$C_RESET"
+    if [ "$SIGNATURE_MODE" != "off" ]; then
+        printf '    Signatur       %s%s%s\n' "$C_GRN" "$SIGNATURE_MODE (gpgv)" "$C_RESET"
+    fi
     printf '    Ablage         %s%s%s\n' "$C_DIM" "$(truncate_mid "$DATA_DIR" $((w - 19)))" "$C_RESET"
     printf '\n'
 
@@ -1356,6 +1658,7 @@ main() {
     [ "$HAVE_PCRE" -eq 0 ] && log "INFO" "Ohne PCRE-grep: nutze BusyBox-kompatiblen Parser."
     ST_PHASE="prüfe Anonymität"; render
 
+    prepare_keyring
     verify_anonymity
     wait_for_host
     log "INFO" "Verbunden (Host $ST_HOST_CODE / Archiv $ST_ARCHIVE_CODE)."

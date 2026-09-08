@@ -304,9 +304,15 @@ function renderSettings(){
     } else if(f.type==="int"){
       input = `<input type="number" data-key="${esc(f.key)}" value="${esc(v)}"${lock}
                  ${f.min!=null?`min="${f.min}"`:""} ${f.max!=null?`max="${f.max}"`:""}>`;
+    } else if(f.type==="enum"){
+      input = `<select data-key="${esc(f.key)}"${lock} style="width:100%;padding:8px 11px;
+                 border:1px solid var(--line);border-radius:8px;background:var(--bg);
+                 color:var(--fg);font:inherit">` +
+        (f.choices||[]).map(c=>`<option value="${esc(c)}"${c===v?" selected":""}>${esc(c)}</option>`).join("") +
+        `</select>`;
     } else {
       input = `<input type="text" data-key="${esc(f.key)}" value="${esc(v)}" spellcheck="false"${lock}
-                 placeholder="${f.type==='url_opt'?'optional':''}">`;
+                 placeholder="${f.type==='url_opt'||f.type==='path_opt'?'optional':''}">`;
     }
     const note = f.locked
       ? `<div class="help" style="color:var(--ok)">🔒 Fest eingestellt – im Browser nicht änderbar (ENFORCE_ANON).</div>`

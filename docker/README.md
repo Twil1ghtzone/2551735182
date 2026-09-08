@@ -136,23 +136,51 @@ Reverse-Proxy der NAS mit HTTPS davorstellen.
   ist — dort verschlüsselt Tor selbst.
 - Tor liefert wenige MB/s. Sehr große Bestände dauern entsprechend.
 
+### Signaturprüfung einrichten
+
+1. Öffentlichen Schlüssel des Herausgebers besorgen – **nicht** vom selben
+   Server wie die Dateien, sonst ist der Anker wertlos.
+2. Nach `/data/config/trusted.asc` legen.
+3. In der Oberfläche unter *Signatur*: Modus `sums` oder `perfile`,
+   Schlüsseldatei eintragen und **den Fingerabdruck festnageln**.
+
+Ohne Fingerabdruck warnt das Protokoll: eine ausgetauschte Schlüsseldatei
+fiele sonst nicht auf. Mit Fingerabdruck bricht der Lauf ab, bevor
+irgendetwas heruntergeladen wird.
+
+### Eigene Inhaltsprüfung
+
+`SCAN_CMD` zeigt auf ein ausführbares Skript, das den Dateipfad bekommt.
+Rückgabe ungleich 0 schiebt die Datei in Quarantäne. Ein Beispiel liegt
+unter `docker/examples/scan.sh`.
+
+Das ist **absichtlich nicht in der Oberfläche einstellbar** – ein Eingabefeld
+für ein auszuführendes Programm wäre eine Fernausführungslücke. Es geht nur
+über die Compose-Umgebung.
+
+### Basis-Image aktualisieren
+
+Beide Dockerfiles sind auf einen Digest festgenagelt. Das ist
+nachvollziehbar, bekommt aber keine Sicherheitsupdates von allein:
+
+```bash
+./docker/update-base.sh && docker compose build --no-cache
+```
+
+Etwa monatlich ausführen.
+
 ### Offene Punkte
 
 Ehrlich benannt, was **nicht** abgesichert ist:
 
-- **Keine Signaturprüfung.** Die Prüfsummendatei kommt vom selben Server wie
-  die Dateien. Wer den Server kontrolliert, fälscht beides. Eine
-  GPG-signierte `SHA256SUMS` gegen einen hinterlegten Schlüssel wäre der
-  nächste sinnvolle Schritt.
-- **Kein TLS in der Vorgabe.** Zugangswort und Sitzungscookie gehen im
-  Klartext durchs LAN, bis `UI_TLS_CERT`/`UI_TLS_KEY` gesetzt sind.
-- **Das Basis-Image ist auf ein Tag festgelegt, nicht auf einen Digest.**
-  `debian:12-slim` kann sich ändern. Für maximale Nachvollziehbarkeit den
-  Digest eintragen (`FROM debian:12-slim@sha256:...`).
-- **Der Inhalt einer Datei wird nicht auf Schadcode geprüft.** Ein Haken für
-  einen Virenscanner vor dem Verschieben ins Zielverzeichnis fehlt noch.
-- **`Retry-After` wird ignoriert**, und dauerhaft scheiternde Dateien werden
-  bei jedem Lauf erneut geladen.
+- **Das selbst erzeugte TLS-Zertifikat schützt vor Mitlesen, nicht vor einem
+  Angreifer, der sich aktiv dazwischenschaltet.** Für echten Schutz ein
+  eigenes Zertifikat einhängen oder den Reverse-Proxy der NAS nutzen.
+- **Wer die Oberfläche erreicht, kann Downloads auslösen und Dateinamen
+  sehen.** Der Port gehört ins LAN, nicht ins Internet.
+- **Die Inhaltsprüfung ist nur so gut wie das hinterlegte Skript.** Ohne
+  `SCAN_CMD` findet keine statt.
+- **Der festgenagelte Digest veraltet**, wenn `update-base.sh` nie läuft.
 
 ## Sicherheitsentscheidungen
 

@@ -45,15 +45,34 @@ services:
       - ENFORCE_ANON=1                  # Schutz im Browser nicht abschaltbar
       - PIN_SOCKS_PROXY=socks5h://tor:9050
       - PIN_REQUIRE_HTTPS=1             # 0 nur, wenn dein Ziel .onion ist
-      # Für HTTPS auf der Oberfläche eigene Dateien einhängen und setzen:
+      # TLS: erzeugt beim ersten Start ein eigenes Zertifikat und schreibt
+      # den Fingerabdruck ins Protokoll. Für ein echtes Zertifikat die
+      # beiden Pfade setzen oder den Reverse-Proxy der NAS davorstellen.
+      - UI_TLS_AUTO=1
+      # - UI_TLS_HOST=192.168.1.50     # kommt in den Zertifikatsnamen
       # - UI_TLS_CERT=/data/config/ui.crt
       # - UI_TLS_KEY=/data/config/ui.key
+      # Eigene Inhaltsprüfung vor der Übernahme (z. B. Virenscanner).
+      # Absichtlich NICHT in der Oberfläche einstellbar – ein Eingabefeld
+      # für ein auszuführendes Programm wäre eine Fernausführungslücke.
+      # - SCAN_CMD=/data/config/scan.sh
     security_opt: [no-new-privileges:true]
     cap_drop: [ALL]
     read_only: true          # Nur /data und /tmp sind beschreibbar
     tmpfs:
       - /tmp:size=64m,mode=1777
       - /run:size=8m
+
+# Beispiel für einen Virenscanner als Beiwagen. Die Signaturen (~1 GB)
+# gehören nicht ins Downloader-Image.
+#  clamav:
+#    image: clamav/clamav:stable
+#    container_name: downloader-clamav
+#    restart: unless-stopped
+#    networks: [tornet]
+#    volumes:
+#      - /volume1/daten/archiv:/data:ro
+#    # /data/config/scan.sh ruft dann clamdscan im Beiwagen auf.
 
 networks:
   tornet:
